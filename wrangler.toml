@@ -1,0 +1,31 @@
+name = "cdn3-dev"
+main = "src/index.ts"
+compatibility_date = "2023-05-10"
+compatibility_flags = [ "nodejs_compat" ]
+logpush = true
+
+# Specifies the r2 buckets. r2 bucket names are scoped to your account (not global). The buckets should be publicly inaccessible.
+r2_buckets = [{ binding = "BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" }]
+
+# The path prefix for uploads/downloads, ex. localhost/upload/<PATH_PREFIX>/<object-id>
+vars.PATH_PREFIX = "attachments"
+durable_objects.bindings = [{name = "UPLOAD_HANDLER", class_name = "UploadHandler"}]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["UploadHandler"]
+
+[env.production]
+name = "cdn3"
+durable_objects.bindings = [{name = "UPLOAD_HANDLER", class_name = "UploadHandler"}]
+r2_buckets = [{ binding = "BUCKET", bucket_name = "attachments", preview_bucket_name = "attachments" }]
+vars.PATH_PREFIX = "attachments"
+
+[env.staging]
+name = "cdn3-staging"
+durable_objects.bindings = [{name = "UPLOAD_HANDLER", class_name = "UploadHandler"}]
+r2_buckets = [{ binding = "BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" }]
+vars.PATH_PREFIX = "attachments"
+
+# To set an auth secret,
+# wrangler secrets put SHARED_AUTH_SECRET 

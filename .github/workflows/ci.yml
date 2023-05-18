@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [ ravi/initial-commit ]
+  pull_request:
+    branches: [ ravi/initial-commit ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --experimental-vm-modules
+    steps:
+    - uses: actions/checkout@v3
+    - name: Use Node.js version
+      uses: actions/setup-node@v3
+      with:
+        node-version: 18.16.1
+        cache: 'npm'
+    - run: npm ci
+    - run: npm run build
+    - run: npm test
