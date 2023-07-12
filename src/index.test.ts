@@ -332,7 +332,7 @@ describe('Tus', () => {
 
             const expectedEtag = await s3Etag(body(uploadSize, {pattern: 'test'}));
             expect(get.headers.get('etag')).toBe(expectedEtag);
-        });
+        }, {timeout: 10000});
 
 });
 
@@ -361,7 +361,7 @@ describe('tus-js-client', () => {
 
             const resp = await fetch(`http://${worker.address}:${worker.port}/${prefix}/${name}`);
             expect(await resp.text()).toBe('test');
-        }, {timeout: 10000});
+        });
 });
 
 async function headerFor(key: string): Promise<string> {
