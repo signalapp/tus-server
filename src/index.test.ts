@@ -268,7 +268,12 @@ describe('Tus', () => {
         expect(create.status).toBe(201);
         expect(create.headers.get('Upload-Offset')).toBe('3');
 
-        const upload = await patchRequest(4, 'ba');
+        // Sending a request to the test workerd with an unconsumed body sometimes flakes. The
+        // validation we're testing for happens before the body is used anyway, so just leave
+        // it off until this issue is fixed.
+        // https://github.com/cloudflare/workers-sdk/issues/3607
+        // const upload = await patchRequest(4, 'ba');
+        const upload = await patchRequest(4);
         expect(upload.status).toBe(409);
 
         await patchRequest(3, 'bar');
