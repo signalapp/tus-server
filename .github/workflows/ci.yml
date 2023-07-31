@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ ravi/initial-commit ]
+    branches: [ main ]
   pull_request:
-    branches: [ ravi/initial-commit ]
+    branches: [ main ]
 
 jobs:
   build:
