@@ -50,9 +50,9 @@ export default {
     async fetch(
         request: Request,
         env: Env,
-        _ctx: ExecutionContext
+        ctx: ExecutionContext
     ): Promise<Response> {
-        return await router.handle(request, env).catch(e => {
+        return await router.handle(request, env, ctx).catch(e => {
             console.log('error: ' + e.stack);
             return error(e);
         }).then(json);
@@ -60,12 +60,18 @@ export default {
 };
 
 
-async function getHandler(request: IRequest, env: Env): Promise<Response> {
+async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): Promise<Response> {
     const requestId = request.params.id;
     if (request.params.bucket !== env.PATH_PREFIX) {
         return error(404);
     }
 
+    const cache = caches.default;
+    const cacheKey = new Request(new URL(request.url.toString()), request);
+    let response = await cache.match(cacheKey);
+    if (response != null) {
+        return response;
+    }
     const object = await new RetryBucket(env.BUCKET, DEFAULT_RETRY_PARAMS).get(requestId);
 
     if (object === null) {
@@ -86,7 +92,9 @@ async function getHandler(request: IRequest, env: Env): Promise<Response> {
         headers.set(X_SIGNAL_CHECKSUM_SHA256, object.customMetadata[X_SIGNAL_CHECKSUM_SHA256]);
     }
 
-    return new Response(object.body, {headers});
+    response = new Response(object.body, {headers});
+    ctx.waitUntil(cache.put(cacheKey, response.clone()));
+    return response;
 
 }
 
