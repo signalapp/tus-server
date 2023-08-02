@@ -7,6 +7,7 @@ import {Buffer} from 'node:buffer';
 import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
+import {DEFAULT_RETRY_PARAMS, RetryBucket} from './retry';
 
 export {UploadHandler} from './uploadHandler';
 
@@ -65,7 +66,7 @@ async function getHandler(request: IRequest, env: Env): Promise<Response> {
         return error(404);
     }
 
-    const object = await env.BUCKET.get(requestId);
+    const object = await new RetryBucket(env.BUCKET, DEFAULT_RETRY_PARAMS).get(requestId);
 
     if (object === null) {
         return error(404);
@@ -80,7 +81,7 @@ async function getHandler(request: IRequest, env: Env): Promise<Response> {
         headers.set(X_SIGNAL_CHECKSUM_SHA256, toBase64(object.checksums.sha256));
     }
 
-    // it was a multipart upload so we were forced to write a sha256 checksum as a custom header
+    // it was a multipart upload, so we were forced to write a sha256 checksum as a custom header
     if (object.customMetadata?.[X_SIGNAL_CHECKSUM_SHA256] != null) {
         headers.set(X_SIGNAL_CHECKSUM_SHA256, object.customMetadata[X_SIGNAL_CHECKSUM_SHA256]);
     }

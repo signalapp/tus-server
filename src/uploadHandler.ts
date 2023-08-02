@@ -7,6 +7,7 @@ import {AsyncLock, generateParts, readIntFromHeader, toBase64, WritableStreamBuf
 import {Env} from './index';
 import {Digester, noopDigester, sha256Digester} from './digest';
 import {parseChecksum, parseUploadMetadata} from './parse';
+import {DEFAULT_RETRY_PARAMS, isR2ChecksumError, RetryBucket, RetryMultipartUpload} from './retry';
 
 export const TUS_VERSION = '1.0.0';
 
@@ -70,7 +71,8 @@ export class UploadHandler {
     env: Env;
     router: RouterType;
     parts: StoredR2Part[];
-    multipart: R2MultipartUpload | undefined;
+    multipart: RetryMultipartUpload | undefined;
+    retryBucket: RetryBucket;
 
     // only allow a single request to operate at a time
     requestGate: AsyncLock;
@@ -81,6 +83,7 @@ export class UploadHandler {
         this.env = env;
         this.parts = [];
         this.requestGate = new AsyncLock();
+        this.retryBucket = new RetryBucket(env.BUCKET, DEFAULT_RETRY_PARAMS);
         this.router = Router()
             .post('/upload/:bucket', this.exclusive(this.create))
             .patch('/upload/:bucket/:id', this.exclusive(this.patch))
@@ -322,7 +325,7 @@ export class UploadHandler {
                     if (!finished) {
                         // write the partial part to a temporary object so we can rehydrate it
                         // later, and then we're done
-                        await this.env.BUCKET.put(this.tempkey(), part.bytes);
+                        await this.r2Put(this.tempkey(), part.bytes);
                         uploadOffset += part.bytes.byteLength;
                         await this.state.storage.put(UPLOAD_OFFSET_KEY, uploadOffset);
                     } else if (!this.multipart) {
@@ -356,7 +359,7 @@ export class UploadHandler {
 
     // Compute the SHA-256 checksum of a remote r2 object
     async retrieveChecksum(r2Key: string): Promise<ArrayBuffer> {
-        const body = await this.env.BUCKET.get(r2Key);
+        const body = await this.retryBucket.get(r2Key);
         if (body == null) {
             throw new UnrecoverableError(`Object ${r2Key} not found directly after uploading`, r2Key);
         }
@@ -385,7 +388,7 @@ export class UploadHandler {
 
         // Otherwise, we should have stashed a temporary object in R2 with whatever was
         // left-over after the last part we uploaded
-        const tempobj = await this.env.BUCKET.get(this.tempkey());
+        const tempobj = await this.retryBucket.get(this.tempkey());
         if (tempobj == null) {
             throw new UnrecoverableError(`we claimed to have ${uploadOffset} bytes, only had ${partOffset}`, r2Key);
         }
@@ -434,39 +437,34 @@ export class UploadHandler {
             if (uploadInfo.multipartUploadId == null) {
                 throw new UnrecoverableError(`had ${this.parts.length} stored parts but no stored multipartUploadId`, r2Key);
             }
-            this.multipart = this.env.BUCKET.resumeMultipartUpload(r2Key, uploadInfo.multipartUploadId);
+            this.multipart = this.r2ResumeMultipartUpload(r2Key, uploadInfo.multipartUploadId);
         }
         return partOffset;
     }
 
-    async r2CreateMultipartUpload(r2Key: string, uploadInfo: StoredUploadInfo): Promise<R2MultipartUpload> {
+    async r2CreateMultipartUpload(r2Key: string, uploadInfo: StoredUploadInfo): Promise<RetryMultipartUpload> {
         const customMetadata: Record<string, string> = {};
         if (uploadInfo.checksum != null) {
             customMetadata[X_SIGNAL_CHECKSUM_SHA256] = toBase64(uploadInfo.checksum);
         }
-        const upload = await this.env.BUCKET.createMultipartUpload(r2Key, {customMetadata});
-        uploadInfo.multipartUploadId = upload.uploadId;
+        const upload = await this.retryBucket.createMultipartUpload(r2Key, {customMetadata});
+        uploadInfo.multipartUploadId = upload.r2MultipartUpload.uploadId;
         await this.state.storage.put(UPLOAD_INFO_KEY, uploadInfo);
         return upload;
     }
 
+    r2ResumeMultipartUpload(r2Key: string, multipartUploadId: string): RetryMultipartUpload {
+        return this.retryBucket.resumeMultipartUpload(r2Key, multipartUploadId);
+    }
+
     async r2Put(r2Key: string, bytes: Uint8Array, checksum?: Uint8Array) {
         try {
-            await this.env.BUCKET.put(r2Key, bytes, {sha256: checksum});
+            await this.retryBucket.put(r2Key, bytes, checksum);
         } catch (e) {
-            // R2 bindings currently has no structured errors :( . We need to check for expected errors
-            // by searching error messages. These usually contain a numeric error code, but not always
-            if (e != null && e instanceof Object && Object.prototype.hasOwnProperty.call(e, 'message')) {
-                const msg: string = (e as { message: string }).message;
-
-                // "put: The SHA-256 checksum you specified did not match what we received.
-                // You provided a SHA-256 checksum with value: <sha>
-                // Actual SHA-256 was: <sha> (10037)"
-                if (msg.toLowerCase().includes('sha-256') || msg.includes('10037')) {
-                    console.error(`checksum failure: ${msg}`);
-                    await this.cleanup();
-                    throw new StatusError(415, msg);
-                }
+            if (isR2ChecksumError(e)) {
+                console.error(`checksum failure: ${e}`);
+                await this.cleanup();
+                throw new StatusError(415);
             }
             throw e;
         }
@@ -508,7 +506,7 @@ export class UploadHandler {
         // try our best to clean up R2 state we may have left around, but
         // if we fail these objects/transactions will eventually expire
         try {
-            await this.env.BUCKET.delete(this.tempkey());
+            await this.retryBucket.delete(this.tempkey());
             if (r2Key != null) {
                 await this.hydrateParts(
                     r2Key,
