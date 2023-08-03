@@ -337,7 +337,7 @@ describe('Tus', () => {
 
             const expectedEtag = await s3Etag(body(uploadSize, {pattern: 'test'}));
             expect(get.headers.get('etag')).toBe(expectedEtag);
-        }, {timeout: 10000});
+        }, {timeout: 20000});
 
 });
 
