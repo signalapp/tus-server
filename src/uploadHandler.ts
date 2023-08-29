@@ -176,7 +176,7 @@ export class UploadHandler {
         await this.state.storage.put(UPLOAD_OFFSET_KEY, 0);
         await this.state.storage.put(UPLOAD_INFO_KEY, uploadInfo);
 
-        const uploadLocation = new URL(r2Key, request.url);
+        const uploadLocation = new URL(r2Key, request.url.endsWith('/') ? request.url : request.url + '/');
 
         const uploadOffset = hasContent
             ? await this.appendBody(r2Key, request.body, 0, uploadInfo)

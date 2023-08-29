@@ -85,6 +85,19 @@ describe('request validation', () => {
         });
         expect(res.status).toBe(400);
     });
+
+    it('accepts no trailing slash', async () => {
+        const res = await worker.fetch(`http://localhost/upload/${prefix}`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await headerFor('abc'),
+                'Upload-Length': '1',
+            }
+        });
+        expect(res.status).toBe(201);
+        expect(res.headers.get('location')).toBe(`http://localhost/upload/${prefix}/abc`);
+    });
 });
 
 
