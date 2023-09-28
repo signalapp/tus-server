@@ -59,6 +59,55 @@ describe('worker auth', () => {
         expect(await res.text()).toBe('');
         expect(res.status).toBe(201);
     });
+
+    it('rejects backups POST with bad permission', async () => {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await backupHeaderFor('abc', 'read'),
+                'Upload-Length': '1'
+            }
+        });
+        expect(res.status).toBe(401);
+    });
+
+    it('accepts unauthd GET to attachments', async () => {
+        const res = await worker.fetch(`http://localhost/${attachmentsPath}/abc`);
+        expect(res.status).toBe(404);
+    });
+
+    it('rejects unauthd GET to backups', async () => {
+        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`);
+        expect(res.status).toBe(401);
+    });
+
+    it('rejects GET to backups with no second component', async () => {
+        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/`);
+        expect(res.status).toBe(401);
+    });
+
+    it.each(['write', '', 'abc'])('rejects GET to backups with %s permission', async (permission) => {
+        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`, {
+            headers: {'Authorization': await backupHeaderFor('abc', permission)}
+        });
+        expect(res.status).toBe(401);
+    });
+
+    it.each(['ab', '/abc', 'abc/', '', 'abc/def'])('rejects GET with incorrect subdir %s', async (subdir) => {
+        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`, {
+            headers: {'Authorization': await backupHeaderFor(subdir, 'read')}
+        });
+        expect(res.status).toBe(401);
+    });
+
+
+    it('accepts subdir authd GET to backups', async () => {
+        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`, {
+            headers: {'Authorization': await backupHeaderFor('abc', 'read')}
+        });
+        expect(res.status).toBe(404);
+    });
 });
 
 describe('request validation', () => {
@@ -361,31 +410,32 @@ describe('tus-js-client-%s', () => {
     test.each([false, true])('uploads creation-with-upload=%s',
         async (uploadDataDuringCreation: boolean) => {
             const blob = Buffer.from('test', 'utf-8');
-            await tusClientUpload(name, attachmentsPath, blob, {uploadDataDuringCreation: uploadDataDuringCreation});
+            await tusClientUpload(name, attachmentsPath, await headerFor(name), blob, {uploadDataDuringCreation: uploadDataDuringCreation});
             const resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${name}`);
             expect(await resp.text()).toBe('test');
         });
 
     it('accepts uploads with slashes', async () => {
         const blob = Buffer.from('test', 'utf-8');
-        const name = 'a/b/c';
-        await tusClientUpload(name, backupsPath, blob);
-        const resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${name}`);
+        const name = 'subdir/b/c';
+        await tusClientUpload(name, backupsPath, await backupHeaderFor(name, 'write'), blob);
+        const resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${name}`, {
+            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
+        });
         expect(await resp.text()).toBe('test');
     });
 });
 
 describe('path routing', () => {
-    const name = 'test-client-obj';
     it('selects correct bucket', async () => {
-        const attachmentName = 'attachmentName';
-        const backupName = 'backupName';
+        const attachmentName = 'subdir/attachmentName';
+        const backupName = 'subdir/backupName';
         const attachmentBlob = Buffer.from('attachment123', 'utf-8');
         const backupBlob = Buffer.from('backup123', 'utf-8');
 
         // write the attachment to the attachments bucket, the backup to the backup bucket
-        await tusClientUpload(attachmentName, attachmentsPath, attachmentBlob);
-        await tusClientUpload(backupName, backupsPath, backupBlob);
+        await tusClientUpload(attachmentName, attachmentsPath, await headerFor(attachmentName), attachmentBlob);
+        await tusClientUpload(backupName, backupsPath, await backupHeaderFor(backupName, 'write'), backupBlob);
 
         // the attachments bucket should have the attachment but not the backup
         let resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${attachmentName}`);
@@ -394,22 +444,31 @@ describe('path routing', () => {
         expect(resp.status).toBe(404);
 
         // the backup bucket should have the backup but not the attachment
-        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${attachmentName}`);
+        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${attachmentName}`, {
+            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
+        });
         expect(resp.status).toBe(404);
-        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${backupName}`);
+        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${backupName}`, {
+            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
+        });
         expect(await resp.text()).toBe('backup123');
 
     });
 });
 
-async function headerFor(key: string, pathPrefix?: string): Promise<string> {
-    const user = `${pathPrefix || attachmentsPath}/${key}`;
+async function headerFor(key: string): Promise<string> {
+    const user = `${attachmentsPath}/${key}`;
     const pass = await auth.generatePass(user);
     return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
 }
 
-async function tusClientUpload(name: string, pathPrefix: string, blob: Buffer, options?: UploadOptions) {
-    const authHeader = await headerFor(name, pathPrefix);
+async function backupHeaderFor(key: string, permission: string): Promise<string> {
+    const user = `${permission}$${backupsPath}/${key}`;
+    const pass = await auth.generatePass(user);
+    return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+}
+
+async function tusClientUpload(name: string, pathPrefix: string, authHeader: string, blob: Buffer, options?: UploadOptions) {
     await new Promise<void>((resolve, reject) => {
         // node tus.Upload takes Buffer but typescript bindings are wrong
         const upload = new tus.Upload(blob as never as Blob, {

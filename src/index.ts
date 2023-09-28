@@ -34,20 +34,65 @@ let auth: Auth | undefined;
 
 const router = Router();
 router
-    // read the object :id directly from R2
-    .get('/:bucket/:id+', getHandler)
-
-    // TUS protocol operation, dispatched to an UploadHandler durable object
-    .post('/upload/:bucket', withAuthenticatedKeyFromMetadata, uploadHandler)
-
-    // TUS protocol operation, dispatched to an UploadHandler durable object
-    .patch('/upload/:bucket/:id+', withAuthenticatedKey, uploadHandler)
-
-    // TUS protocol operation, dispatched to an UploadHandler durable object
-    .head('/upload/:bucket/:id+', withAuthenticatedKey, uploadHandler)
-
     // Describes what TUS features we support
     .options('/upload/:bucket', optionsHandler)
+
+    // --- attachment handler methods ---
+    // GETs go straight to R2 and are publicly accessible
+    // TUS operations go to a durable object and require authentication
+
+    // read the object :id directly from R2
+    .get(`/${ATTACHMENT_PREFIX}/:id+`,
+        withNamespace(ATTACHMENT_PREFIX),
+        withUnauthenticatedKeyFromId,
+        getHandler)
+    // TUS protocol operations, dispatched to an UploadHandler durable object
+    .post(`/upload/${ATTACHMENT_PREFIX}`,
+        withNamespace(ATTACHMENT_PREFIX),
+        withAuthenticatedUser,
+        withAuthorizedKeyFromMetadata,
+        uploadHandler)
+    .patch(`/upload/${ATTACHMENT_PREFIX}/:id+`,
+        withNamespace(ATTACHMENT_PREFIX),
+        withAuthenticatedUser,
+        withAuthorizedKeyFromPath,
+        uploadHandler)
+    .head(`/upload/${ATTACHMENT_PREFIX}/:id+`,
+        withNamespace(ATTACHMENT_PREFIX),
+        withAuthenticatedUser,
+        withAuthorizedKeyFromPath,
+        uploadHandler)
+
+    // --- backup handler methods ---
+    // GETs go straight to R2 and must include a subdir that is authenticated with a read permission
+    // TUS operations go to a durable object and require authentication with a write permission
+
+    // read the object :subdir/:id directly from R2, the request needs read permissions for :subdir
+    .get(`/${BACKUP_PREFIX}/:subdir/:id+`,
+        withNamespace(BACKUP_PREFIX),
+        withAuthenticatedUser,
+        withReadAuthorization,
+        withSubdirAuthorizedKey,
+        getHandler)
+    // TUS protocol operations, dispatched to an UploadHandler durable object
+    .post(`/upload/${BACKUP_PREFIX}`,
+        withNamespace(BACKUP_PREFIX),
+        withAuthenticatedUser,
+        withWriteAuthorization,
+        withAuthorizedKeyFromMetadata,
+        uploadHandler)
+    .patch(`/upload/${BACKUP_PREFIX}/:id+`,
+        withNamespace(BACKUP_PREFIX),
+        withAuthenticatedUser,
+        withWriteAuthorization,
+        withAuthorizedKeyFromPath,
+        uploadHandler)
+    .head(`/upload/${BACKUP_PREFIX}/:id+`,
+        withNamespace(BACKUP_PREFIX),
+        withAuthenticatedUser,
+        withWriteAuthorization,
+        withAuthorizedKeyFromPath,
+        uploadHandler)
 
     .all('*', () => error(404));
 
@@ -66,9 +111,9 @@ export default {
 
 
 async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const requestId = request.params.id;
+    const requestId = request.key;
 
-    const bucket = selectNamespace(env, request.params.bucket)?.bucket;
+    const bucket: R2Bucket = request.namespace.bucket;
     if (bucket == null) {
         return error(404);
     }
@@ -122,7 +167,7 @@ async function uploadHandler(request: IRequest, env: Env): Promise<Response> {
     const requestId: string = request.key;
 
     // The id of the DurableObject is derived from the authenticated upload id provided by the requester
-    const durableObjNs = selectNamespace(env, request.params.bucket)?.doNamespace;
+    const durableObjNs: DurableObjectNamespace = request.namespace.doNamespace;
     if (durableObjNs == null) {
         return error(500, 'invalid bucket configuration');
     }
@@ -136,19 +181,40 @@ async function uploadHandler(request: IRequest, env: Env): Promise<Response> {
     });
 }
 
-// Returns the durable object namespace and R2 bucket to use for operations against the provided path prefix
-function selectNamespace(env: Env, prefix: string): {
+interface Namespace {
     doNamespace: DurableObjectNamespace,
     bucket: R2Bucket
-} | undefined {
+    name: 'attachments' | 'backups'
+}
+
+// Returns the durable object namespace and R2 bucket to use for operations against the provided path prefix
+function selectNamespace(env: Env, prefix: string): Namespace | undefined {
     switch (prefix) {
         case ATTACHMENT_PREFIX:
-            return {doNamespace: env.ATTACHMENT_UPLOAD_HANDLER, bucket: env.ATTACHMENT_BUCKET};
+            return {
+                doNamespace: env.ATTACHMENT_UPLOAD_HANDLER,
+                bucket: env.ATTACHMENT_BUCKET,
+                name: ATTACHMENT_PREFIX
+            };
         case BACKUP_PREFIX:
-            return {doNamespace: env.BACKUP_UPLOAD_HANDLER, bucket: env.BACKUP_BUCKET};
+            return {
+                doNamespace: env.BACKUP_UPLOAD_HANDLER,
+                bucket: env.BACKUP_BUCKET,
+                name: BACKUP_PREFIX
+            };
         default:
             return undefined;
     }
+}
+
+// Set request.namespace indicating the durable object / R2 bucket requests should be routed to
+function withNamespace(bucket: string): (request: IRequest, env: Env, ctx: ExecutionContext) => Response | undefined {
+    return (request, env, _ctx) => {
+        request.namespace = selectNamespace(env, bucket);
+        if (request.namespace == null) {
+            return error(404);
+        }
+    };
 }
 
 interface ParseError {
@@ -178,28 +244,10 @@ function parseBasicAuth(auth: string): Credentials | ParseError {
     return {state: 'success', user: username, password: password};
 }
 
-// Checks the request is authenticated for the name provided in the request path :id segment
-async function withAuthenticatedKey(request: IRequest, env: Env): Promise<Response | undefined> {
-    return await authAgainstUploadName(request, env, request.params.bucket, request.params.id);
-}
 
-// Checks the request is authenticated for the name provided in the TUS upload-metadata
-async function withAuthenticatedKeyFromMetadata(request: IRequest, env: Env): Promise<Response | undefined> {
-    const key = parseUploadMetadata(request.headers).filename;
-    if (key == null) {
-        return error(400, 'upload-metadata filename required');
-    }
-    return await authAgainstUploadName(request, env, request.params.bucket, key);
-}
-
-// Checks the request is authenticated for key
-async function authAgainstUploadName(request: IRequest, env: Env, bucket: string, key: string): Promise<Response | undefined> {
+// Set request.user to the user from the basic auth credentials if the credential passes authentication
+async function withAuthenticatedUser(request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response | undefined> {
     auth = auth || await createAuth(env.SHARED_AUTH_SECRET, 3600 * 24 * 7);
-
-    if (bucket !== ATTACHMENT_PREFIX && bucket !== BACKUP_PREFIX) {
-        return error(404);
-    }
-
     const authHeader = request.headers.get('Authorization');
     if (!authHeader) {
         return error(401, 'missing credentials');
@@ -214,14 +262,113 @@ async function authAgainstUploadName(request: IRequest, env: Env, bucket: string
     if (!valid) {
         return error(401, 'invalid credentials');
     }
+    request.user = parsed.user;
+}
 
-    if (key === '') {
-        return error(400, 'invalid upload name');
+
+// Auth usernames are of the form [permission$]namespace/entity. withAuthenticatedUser ensures that the username is
+// a valid credential. After that we must also ensure that the user is authorized to perform the requested action.
+// - If the endpoint requires permission, the permission field must be extracted and checked
+// - The namespace must match the path prefix, e.g. attachments or backups
+// - For uploads, the entity must match the target of the upload operation (which may be specified via path or metadata)
+// - For non-public reads, the entity must match the top-level parent directory of the read-target
+
+
+// Extracts the permission specifier from the already authenticated request.user and if it is 'read', set request.user
+// to the rest of the username
+function withReadAuthorization(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
+    return withPermission('read', request, env);
+}
+
+// Extracts the permission specifier from the already authenticated request.user and if it is 'write', set request.user
+// to the rest of the username
+function withWriteAuthorization(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
+    return withPermission('write', request, env);
+}
+
+// Strips off the permission specifier and make sure it matches expectedPermission
+function withPermission(expectedPermission: string, request: IRequest, _env: Env): Response | undefined {
+    // the user should be set by a prior middleware (and should already have been authenticated)
+    if (!request.user) {
+        return error(500);
+    }
+    // strip off the permission and check it
+    const splAt = request.user.indexOf('$');
+    if (splAt === -1) {
+        return error(401);
+    }
+    const permission = request.user.substring(0, splAt);
+    if (permission !== expectedPermission) {
+        return error(401);
     }
 
-    if (parsed.user !== bucket + '/' + key) {
-        return error(401, 'invalid credentials for upload name');
+    // set the user as the remainder of the username
+    request.user = request.user.substring(splAt + 1);
+}
+
+// Set request.key to :subdir/:id from the request path, if the authenticated user matches :subdir
+function withSubdirAuthorizedKey(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
+    return setAuthorizedKey({
+        keyExtractor: (request) => `${request.params.subdir}/${request.params.id}`,
+        entityExtractor: (request) => request.params.subdir
+    }, request, env);
+}
+
+// Set request.key to the name extracted from :id in the request path, if the authenticated user matches the name
+function withAuthorizedKeyFromPath(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
+    return setAuthorizedKey({keyExtractor: (request) => `${request.params.id}`}, request, env);
+}
+
+// Set request.key to the name extracted from the uploadMetadata, if the authenticated user the name
+function withAuthorizedKeyFromMetadata(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
+    return setAuthorizedKey({
+        keyExtractor: (request) => parseUploadMetadata(request.headers).filename
+    }, request, env);
+}
+
+export interface AuthOptions {
+    // How to extract the key that will be attached to the request after a successful check
+    keyExtractor: (request: IRequest) => string | undefined;
+    // How to extract the expected contents of the username after the permission. If not
+    // specified, defaults to the key
+    entityExtractor?: (request: IRequest) => string | undefined;
+}
+
+// Set request.key to the request's target if the (already authenticated) username matches the expected username for
+// that target
+function setAuthorizedKey(authOptions: AuthOptions, request: IRequest, _env: Env): Response | undefined {
+    // the user should be set by a prior middleware (and should already have been authenticated)
+    if (!request.user) {
+        return error(500);
+    }
+
+    // the namespace should have been set based on the request path by a prior middleware
+    if (!request.namespace) {
+        return error(404);
+    }
+
+    // the key within the namespace that this request will operate on
+    const key = authOptions.keyExtractor(request);
+    if (!key) {
+        return error(401);
+    }
+
+    // the entity within the namespace that should match the provided username
+    const expectedEntity = (authOptions.entityExtractor || authOptions.keyExtractor)(request);
+    if (!expectedEntity) {
+        return error(401);
+    }
+
+    // the username must match the expected entity that grants permission to the key
+    if (request.user !== `${request.namespace.name}/${expectedEntity}`) {
+        return error(401);
     }
     request.key = key;
 }
 
+
+// Set request.key without any authentication (public access)
+function withUnauthenticatedKeyFromId(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    request.key = request.params.id;
+    return;
+}
