@@ -22,6 +22,7 @@ new_classes = ["UploadHandler"]
 [[migrations]]
 tag = "v2"
 renamed_classes = [{ from = "UploadHandler", to = "AttachmentUploadHandler" }]
+new_classes = ["BackupUploadHandler"]
 
 [env.production]
 name = "cdn3"
