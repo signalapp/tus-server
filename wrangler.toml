@@ -1,31 +1,49 @@
 name = "cdn3-dev"
 main = "src/index.ts"
 compatibility_date = "2023-05-10"
-compatibility_flags = [ "nodejs_compat" ]
+compatibility_flags = ["nodejs_compat"]
 logpush = true
 
 # Specifies the r2 buckets. r2 bucket names are scoped to your account (not global). The buckets should be publicly inaccessible.
-r2_buckets = [{ binding = "BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" }]
+r2_buckets = [
+    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" },
+    { binding = "BACKUP_BUCKET", bucket_name = "backups-staging", preview_bucket_name = "backups-staging" }
+]
 
-# The path prefix for uploads/downloads, ex. localhost/upload/<PATH_PREFIX>/<object-id>
-vars.PATH_PREFIX = "attachments"
-durable_objects.bindings = [{name = "UPLOAD_HANDLER", class_name = "UploadHandler"}]
+durable_objects.bindings = [
+    { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
+    { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
+]
 
 [[migrations]]
 tag = "v1"
 new_classes = ["UploadHandler"]
 
+[[migrations]]
+tag = "v2"
+renamed_classes = [{ from = "UploadHandler", to = "AttachmentUploadHandler" }]
+
 [env.production]
 name = "cdn3"
-durable_objects.bindings = [{name = "UPLOAD_HANDLER", class_name = "UploadHandler"}]
-r2_buckets = [{ binding = "BUCKET", bucket_name = "attachments", preview_bucket_name = "attachments" }]
-vars.PATH_PREFIX = "attachments"
+durable_objects.bindings = [
+    { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
+    { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
+]
+r2_buckets = [
+    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments", preview_bucket_name = "attachments" },
+    { binding = "BACKUP_BUCKET", bucket_name = "backups", preview_bucket_name = "backups" }
+]
 
 [env.staging]
 name = "cdn3-staging"
-durable_objects.bindings = [{name = "UPLOAD_HANDLER", class_name = "UploadHandler"}]
-r2_buckets = [{ binding = "BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" }]
-vars.PATH_PREFIX = "attachments"
+durable_objects.bindings = [
+    { name = "ATTACHMENT_UPLOAD_HANDLER", class_name = "AttachmentUploadHandler" },
+    { name = "BACKUP_UPLOAD_HANDLER", class_name = "BackupUploadHandler" }
+]
+r2_buckets = [
+    { binding = "ATTACHMENT_BUCKET", bucket_name = "attachments-staging", preview_bucket_name = "attachments-staging" },
+    { binding = "BACKUP_BUCKET", bucket_name = "backups-staging", preview_bucket_name = "backups-staging" }
+]
 
 # To set an auth secret,
 # wrangler secrets put SHARED_AUTH_SECRET 

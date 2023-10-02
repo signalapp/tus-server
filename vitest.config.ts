@@ -10,7 +10,8 @@ export default defineConfig({
             modules: true,
             scriptPath: './dist/index.js',
             durableObjects: {
-                UPLOAD_HANDLER: 'UploadHandler',
+                ATTACHMENT_UPLOAD_HANDLER: 'AttachmentUploadHandler',
+                BACKUP_UPLOAD_HANDLER: 'BackupUploadHandler',
             },
         },
     },

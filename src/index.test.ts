@@ -1,14 +1,16 @@
 // Copyright 2023 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import {expect, it, beforeAll, afterAll, describe, test} from 'vitest';
+import {afterAll, beforeAll, describe, expect, it, test} from 'vitest';
 import {createAuth} from './auth';
 import * as tus from 'tus-js-client';
+import {UploadOptions} from 'tus-js-client';
 import {unstable_dev, UnstableDevWorker} from 'wrangler';
 import {X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
 
-const prefix = 'bucket';
+const attachmentsPath = 'attachments';
+const backupsPath = 'backups';
 const secret = 'test';
 const auth = await createAuth(secret, 100);
 
@@ -19,10 +21,7 @@ let worker: UnstableDevWorker;
 beforeAll(async () => {
     worker = await unstable_dev('src/index.ts', {
         experimental: {disableExperimentalWarning: true},
-        vars: {
-            SHARED_AUTH_SECRET: secret,
-            PATH_PREFIX: prefix
-        }
+        vars: {SHARED_AUTH_SECRET: secret}
     });
 });
 
@@ -30,9 +29,10 @@ afterAll(async () => {
     await worker.stop();
 });
 
+
 describe('worker auth', () => {
     it('rejects un-authd request', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${prefix}/`, {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {'Upload-Metadata': `filename ${btoa('test')}`}
         });
@@ -40,7 +40,7 @@ describe('worker auth', () => {
     });
 
     it('rejects misformated auth', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${prefix}/`, {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {'Authorization': 'Complex zzzzz'}
         });
@@ -48,7 +48,7 @@ describe('worker auth', () => {
     });
 
     it('accepts valid auth', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${prefix}/`, {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -63,7 +63,7 @@ describe('worker auth', () => {
 
 describe('request validation', () => {
     it('rejects bad checksum', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${prefix}/`, {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -76,7 +76,7 @@ describe('request validation', () => {
     });
 
     it('rejects no upload-length', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${prefix}/`, {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -87,7 +87,7 @@ describe('request validation', () => {
     });
 
     it('accepts no trailing slash', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${prefix}`, {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -96,7 +96,7 @@ describe('request validation', () => {
             }
         });
         expect(res.status).toBe(201);
-        expect(res.headers.get('location')).toBe(`http://localhost/upload/${prefix}/abc`);
+        expect(res.headers.get('location')).toBe(`http://localhost/upload/${attachmentsPath}/abc`);
     });
 });
 
@@ -127,7 +127,7 @@ describe('Tus', () => {
         if (opts?.body != null) {
             headers['Content-Type'] = 'application/offset+octet-stream';
         }
-        return await worker.fetch(`http://localhost/upload/${prefix}/`, {
+        return await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: headers,
             body: opts?.body
@@ -143,7 +143,7 @@ describe('Tus', () => {
             'Tus-Resumable': '1.0.0'
         });
 
-        return await worker.fetch(`http://localhost/upload/${prefix}/${name}`, {
+        return await worker.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
             method: 'PATCH',
             headers: h,
             duplex: 'half',
@@ -152,7 +152,7 @@ describe('Tus', () => {
     }
 
     async function headRequest() {
-        return worker.fetch(`http://localhost/upload/${prefix}/${name}`, {
+        return worker.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
             method: 'HEAD',
             headers: {
                 'Authorization': await headerFor(name),
@@ -162,7 +162,7 @@ describe('Tus', () => {
     }
 
     async function getRequest() {
-        return await worker.fetch(`http://localhost/${prefix}/${name}`, {
+        return await worker.fetch(`http://localhost/${attachmentsPath}/${name}`, {
             method: 'GET',
             headers: {
                 'Authorization': await headerFor(name),
@@ -355,37 +355,74 @@ describe('Tus', () => {
 });
 
 
-describe('tus-js-client', () => {
+describe('tus-js-client-%s', () => {
     const name = 'test-client-obj';
 
     test.each([false, true])('uploads creation-with-upload=%s',
         async (uploadDataDuringCreation: boolean) => {
             const blob = Buffer.from('test', 'utf-8');
-            const authHeader = await headerFor(name);
-
-            await new Promise<void>((resolve, reject) => {
-                // node tus.Upload takes Buffer but typescript bindings are wrong
-                const upload = new tus.Upload(blob as never as Blob, {
-                    endpoint: `http://${worker.address}:${worker.port}/upload/${prefix}/`,
-                    metadata: {'filename': name},
-                    headers: {'Authorization': authHeader},
-                    onError: reject,
-                    onSuccess: resolve,
-                    uploadSize: 4,
-                    uploadDataDuringCreation: uploadDataDuringCreation
-                });
-                upload.start();
-            });
-
-            const resp = await fetch(`http://${worker.address}:${worker.port}/${prefix}/${name}`);
+            await tusClientUpload(name, attachmentsPath, blob, {uploadDataDuringCreation: uploadDataDuringCreation});
+            const resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${name}`);
             expect(await resp.text()).toBe('test');
         });
+
+    it('accepts uploads with slashes', async () => {
+        const blob = Buffer.from('test', 'utf-8');
+        const name = 'a/b/c';
+        await tusClientUpload(name, backupsPath, blob);
+        const resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${name}`);
+        expect(await resp.text()).toBe('test');
+    });
 });
 
-async function headerFor(key: string): Promise<string> {
-    const user = `${prefix}/${key}`;
+describe('path routing', () => {
+    const name = 'test-client-obj';
+    it('selects correct bucket', async () => {
+        const attachmentName = 'attachmentName';
+        const backupName = 'backupName';
+        const attachmentBlob = Buffer.from('attachment123', 'utf-8');
+        const backupBlob = Buffer.from('backup123', 'utf-8');
+
+        // write the attachment to the attachments bucket, the backup to the backup bucket
+        await tusClientUpload(attachmentName, attachmentsPath, attachmentBlob);
+        await tusClientUpload(backupName, backupsPath, backupBlob);
+
+        // the attachments bucket should have the attachment but not the backup
+        let resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${attachmentName}`);
+        expect(await resp.text()).toBe('attachment123');
+        resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${backupName}`);
+        expect(resp.status).toBe(404);
+
+        // the backup bucket should have the backup but not the attachment
+        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${attachmentName}`);
+        expect(resp.status).toBe(404);
+        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${backupName}`);
+        expect(await resp.text()).toBe('backup123');
+
+    });
+});
+
+async function headerFor(key: string, pathPrefix?: string): Promise<string> {
+    const user = `${pathPrefix || attachmentsPath}/${key}`;
     const pass = await auth.generatePass(user);
     return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
+}
+
+async function tusClientUpload(name: string, pathPrefix: string, blob: Buffer, options?: UploadOptions) {
+    const authHeader = await headerFor(name, pathPrefix);
+    await new Promise<void>((resolve, reject) => {
+        // node tus.Upload takes Buffer but typescript bindings are wrong
+        const upload = new tus.Upload(blob as never as Blob, {
+            endpoint: `http://${worker.address}:${worker.port}/upload/${pathPrefix}/`,
+            metadata: {'filename': name},
+            headers: {'Authorization': authHeader},
+            onError: reject,
+            onSuccess: resolve,
+            uploadSize: blob.length,
+            ...options
+        });
+        upload.start();
+    });
 }
 
 function fillPattern(targetSize: number, pattern: string): Uint8Array {

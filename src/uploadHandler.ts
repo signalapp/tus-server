@@ -78,16 +78,16 @@ export class UploadHandler {
     requestGate: AsyncLock;
 
 
-    constructor(state: DurableObjectState, env: Env) {
+    constructor(state: DurableObjectState, env: Env, bucket: R2Bucket) {
         this.state = state;
         this.env = env;
         this.parts = [];
         this.requestGate = new AsyncLock();
-        this.retryBucket = new RetryBucket(env.BUCKET, DEFAULT_RETRY_PARAMS);
+        this.retryBucket = new RetryBucket(bucket, DEFAULT_RETRY_PARAMS);
         this.router = Router()
             .post('/upload/:bucket', this.exclusive(this.create))
-            .patch('/upload/:bucket/:id', this.exclusive(this.patch))
-            .head('/upload/:bucket/:id', this.exclusive(this.head))
+            .patch('/upload/:bucket/:id+', this.exclusive(this.patch))
+            .head('/upload/:bucket/:id+', this.exclusive(this.head))
             .all('*', () => error(404));
     }
 
@@ -533,6 +533,18 @@ export class UploadHandler {
             return new Date();
         }
         return new Date(expiration);
+    }
+}
+
+export class AttachmentUploadHandler extends UploadHandler {
+    constructor(state: DurableObjectState, env: Env) {
+        super(state, env, env.ATTACHMENT_BUCKET);
+    }
+}
+
+export class BackupUploadHandler extends UploadHandler {
+    constructor(state: DurableObjectState, env: Env) {
+        super(state, env, env.BACKUP_BUCKET);
     }
 }
 

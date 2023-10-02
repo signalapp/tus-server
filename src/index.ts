@@ -9,19 +9,24 @@ import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
 import {DEFAULT_RETRY_PARAMS, RetryBucket} from './retry';
 
-export {UploadHandler} from './uploadHandler';
+export {UploadHandler, BackupUploadHandler, AttachmentUploadHandler} from './uploadHandler';
 
 const DO_CALL_TIMEOUT = 1000 * 60 * 30; // 20 minutes
 
 export interface Env {
-    BUCKET: R2Bucket;
-
     SHARED_AUTH_SECRET: string;
 
-    UPLOAD_HANDLER: DurableObjectNamespace;
+    ATTACHMENT_BUCKET: R2Bucket;
 
-    PATH_PREFIX: string;
+    BACKUP_BUCKET: R2Bucket;
+
+    ATTACHMENT_UPLOAD_HANDLER: DurableObjectNamespace;
+
+    BACKUP_UPLOAD_HANDLER: DurableObjectNamespace;
 }
+
+const ATTACHMENT_PREFIX = 'attachments';
+const BACKUP_PREFIX = 'backups';
 
 
 // lazy init because it requires env but is expensive to create
@@ -30,16 +35,16 @@ let auth: Auth | undefined;
 const router = Router();
 router
     // read the object :id directly from R2
-    .get('/:bucket/:id', getHandler)
+    .get('/:bucket/:id+', getHandler)
 
     // TUS protocol operation, dispatched to an UploadHandler durable object
     .post('/upload/:bucket', withAuthenticatedKeyFromMetadata, uploadHandler)
 
     // TUS protocol operation, dispatched to an UploadHandler durable object
-    .patch('/upload/:bucket/:id', withAuthenticatedKey, uploadHandler)
+    .patch('/upload/:bucket/:id+', withAuthenticatedKey, uploadHandler)
 
     // TUS protocol operation, dispatched to an UploadHandler durable object
-    .head('/upload/:bucket/:id', withAuthenticatedKey, uploadHandler)
+    .head('/upload/:bucket/:id+', withAuthenticatedKey, uploadHandler)
 
     // Describes what TUS features we support
     .options('/upload/:bucket', optionsHandler)
@@ -62,7 +67,9 @@ export default {
 
 async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): Promise<Response> {
     const requestId = request.params.id;
-    if (request.params.bucket !== env.PATH_PREFIX) {
+
+    const bucket = selectNamespace(env, request.params.bucket)?.bucket;
+    if (bucket == null) {
         return error(404);
     }
 
@@ -72,9 +79,9 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
     if (response != null) {
         return response;
     }
-    const object = await new RetryBucket(env.BUCKET, DEFAULT_RETRY_PARAMS).get(requestId);
 
-    if (object === null) {
+    const object = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).get(requestId);
+    if (object == null) {
         return error(404);
     }
 
@@ -113,14 +120,35 @@ async function optionsHandler(_request: IRequest, _env: Env): Promise<Response> 
 // TUS protocol requests (POST/PATCH/HEAD) that get forwarded to a durable object
 async function uploadHandler(request: IRequest, env: Env): Promise<Response> {
     const requestId: string = request.key;
+
     // The id of the DurableObject is derived from the authenticated upload id provided by the requester
-    const handler = env.UPLOAD_HANDLER.get(env.UPLOAD_HANDLER.idFromName(requestId));
+    const durableObjNs = selectNamespace(env, request.params.bucket)?.doNamespace;
+    if (durableObjNs == null) {
+        return error(500, 'invalid bucket configuration');
+    }
+
+    const handler = durableObjNs.get(durableObjNs.idFromName(requestId));
     return await handler.fetch(request.url, {
         body: request.body,
         method: request.method,
         headers: request.headers,
         signal: AbortSignal.timeout(DO_CALL_TIMEOUT)
     });
+}
+
+// Returns the durable object namespace and R2 bucket to use for operations against the provided path prefix
+function selectNamespace(env: Env, prefix: string): {
+    doNamespace: DurableObjectNamespace,
+    bucket: R2Bucket
+} | undefined {
+    switch (prefix) {
+        case ATTACHMENT_PREFIX:
+            return {doNamespace: env.ATTACHMENT_UPLOAD_HANDLER, bucket: env.ATTACHMENT_BUCKET};
+        case BACKUP_PREFIX:
+            return {doNamespace: env.BACKUP_UPLOAD_HANDLER, bucket: env.BACKUP_BUCKET};
+        default:
+            return undefined;
+    }
 }
 
 interface ParseError {
@@ -168,7 +196,7 @@ async function withAuthenticatedKeyFromMetadata(request: IRequest, env: Env): Pr
 async function authAgainstUploadName(request: IRequest, env: Env, bucket: string, key: string): Promise<Response | undefined> {
     auth = auth || await createAuth(env.SHARED_AUTH_SECRET, 3600 * 24 * 7);
 
-    if (bucket !== env.PATH_PREFIX) {
+    if (bucket !== ATTACHMENT_PREFIX && bucket !== BACKUP_PREFIX) {
         return error(404);
     }
 

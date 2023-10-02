@@ -11,11 +11,12 @@ const PART_SIZE = 1024 * 1024 * 5;
 
 describe('uploadHandler', () => {
     const env: Env = getMiniflareBindings() as Env;
-    const r2: R2Bucket = env.BUCKET;
+    const r2: R2Bucket = env.ATTACHMENT_BUCKET;
+    const handler = env.ATTACHMENT_UPLOAD_HANDLER;
 
     it('cleans after alarms', async () => {
-        const id = env.UPLOAD_HANDLER.newUniqueId();
-        const stub = env.UPLOAD_HANDLER.get(id);
+        const id = handler.newUniqueId();
+        const stub = handler.get(id);
 
         const resp = await stub.fetch('http://localhost/upload/bucket/', {
             method: 'POST',
@@ -32,8 +33,8 @@ describe('uploadHandler', () => {
     });
 
     it('cleans after unrecoverable failure', async () => {
-        const id = env.UPLOAD_HANDLER.idFromName('test123');
-        const stub = env.UPLOAD_HANDLER.get(id);
+        const id = handler.idFromName('test123');
+        const stub = handler.get(id);
         const storage = await getMiniflareDurableObjectStorage(id);
 
         // invalid state: temp object should be length 5, is only length 1
@@ -53,8 +54,8 @@ describe('uploadHandler', () => {
     });
 
     it('hydrates from cold storage', async () => {
-        const id = env.UPLOAD_HANDLER.idFromName('test123');
-        const stub = env.UPLOAD_HANDLER.get(id);
+        const id = handler.idFromName('test123');
+        const stub = handler.get(id);
         const storage = await getMiniflareDurableObjectStorage(id);
 
         const tempkey = `temporary/${id.toString()}`;
@@ -81,8 +82,8 @@ describe('uploadHandler', () => {
     });
 
     it('hydrates tx parts from cold storage', async () => {
-        const id = env.UPLOAD_HANDLER.idFromName('test123');
-        const stub = env.UPLOAD_HANDLER.get(id);
+        const id = handler.idFromName('test123');
+        const stub = handler.get(id);
         const storage = await getMiniflareDurableObjectStorage(id);
 
         const partBody = new Uint8Array(PART_SIZE);
@@ -129,7 +130,7 @@ describe('uploadHandler', () => {
             [0, 10, PART_SIZE]
         ]
     )('resumes from storage for chunks=[%s,%s,%s]', async (chunk1Size, chunk2Size, chunk3Size) => {
-        const id = env.UPLOAD_HANDLER.idFromName('test123');
+        const id = handler.idFromName('test123');
         const state = await getMiniflareDurableObjectState(id);
 
         const firstChunk = new Uint8Array(chunk1Size);
@@ -138,7 +139,7 @@ describe('uploadHandler', () => {
 
         const totalLength = firstChunk.length + secondChunk.length + thirdChunk.length;
 
-        const oldObj = new UploadHandler(state, env);
+        const oldObj = new UploadHandler(state, env, r2);
         await runWithMiniflareDurableObjectGates(state, () => oldObj.fetch(new Request('http://localhost/upload/bucket', {
             method: 'POST',
             headers: {
@@ -156,7 +157,7 @@ describe('uploadHandler', () => {
         })));
 
         // create a new object from the same state
-        const newObj = new UploadHandler(state, env);
+        const newObj = new UploadHandler(state, env, r2);
         await runWithMiniflareDurableObjectGates(state, () =>
             newObj.fetch(new Request('http://localhost/upload/bucket/test123', {
                 method: 'PATCH',
