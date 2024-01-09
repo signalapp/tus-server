@@ -60,6 +60,10 @@ export class RetryBucket {
         this.params = params;
     }
 
+    async head(...parameters: Parameters<R2Bucket['head']>): ReturnType<R2Bucket['head']> {
+        return retry(() => this.bucket.head(...parameters), {params: this.params});
+    }
+
     async get(...parameters: Parameters<R2Bucket['get']>): ReturnType<R2Bucket['get']> {
         return retry(() => this.bucket.get(...parameters), {params: this.params});
     }

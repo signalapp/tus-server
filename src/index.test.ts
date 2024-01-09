@@ -342,6 +342,58 @@ describe('Tus', () => {
         expect(await (await getRequest()).text()).toBe('foobar');
     });
 
+    it('returns 200 for head of completed uploads', async () => {
+        await createRequest({uploadLength: 4});
+        await patchRequest(0, 'test');
+
+        // https://tus.io/protocols/resumable-upload#head
+        // The Server MUST always include the Upload-Offset header in the response for a HEAD request, even if the
+        // offset is 0, or the upload is already considered completed.
+        const head = await headRequest();
+        expect(await head.text()).toBe('');
+        expect(head.status).toBe(200);
+        expect(head.headers.get('Upload-Offset')).toBe('4');
+        expect(head.headers.get('Upload-Length')).toBe('4');
+    });
+
+    it('returns upload-length on head if it is known', async () => {
+        await createRequest({uploadLength: 4});
+        await patchRequest(0, 'te');
+
+        let head = await headRequest();
+        expect(await head.text()).toBe('');
+        expect(head.status).toBe(200);
+        expect(head.headers.get('Upload-Offset')).toBe('2');
+        expect(head.headers.get('Upload-Length')).toBe('4');
+
+        await patchRequest(2, 'st');
+
+        head = await headRequest();
+        expect(await head.text()).toBe('');
+        expect(head.status).toBe(200);
+        expect(head.headers.get('Upload-Offset')).toBe('4');
+        expect(head.headers.get('Upload-Length')).toBe('4');
+    });
+
+    it('handles head with missing upload length', async () => {
+        await createRequest();
+        await patchRequest(0, 'te');
+
+        let head = await headRequest();
+        expect(await head.text()).toBe('');
+        expect(head.status).toBe(200);
+        expect(head.headers.get('Upload-Offset')).toBe('2');
+        expect(head.headers.get('Upload-Length')).toBeNull();
+
+        await patchRequest(2, 'st', {'Upload-Length': '4'});
+
+        head = await headRequest();
+        expect(await head.text()).toBe('');
+        expect(head.status).toBe(200);
+        expect(head.headers.get('Upload-Offset')).toBe('4');
+        expect(head.headers.get('Upload-Length')).toBe('4');
+    });
+
     test.each(
         [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1]
     )('rejects incorrect checksum for length=%s', async (bodySize: number) => {
@@ -349,8 +401,15 @@ describe('Tus', () => {
         const upload = await patchRequest(0, body(bodySize, {pattern: 'test'}));
         expect(upload.status).toBe(415);
 
-        // should delete the in-progress upload
-        expect((await headRequest()).status).toBe(404);
+        // should delete the in-progress upload: if the object already existed, Upload-Offset should be the object
+        // length. Otherwise, the head should 404.
+        const head = await headRequest();
+        if (head.status === 200) {
+            expect(head.headers.get('Upload-Offset'))
+                .toBe(head.headers.get('Upload-Length'));
+        } else {
+            expect(head.status).toBe(404);
+        }
     });
 
     test.each(

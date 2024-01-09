@@ -193,20 +193,33 @@ export class UploadHandler {
     }
 
     // get the current upload offset to resume an upload
-    async head(_request: IRequest): Promise<Response> {
-        const offset: number | undefined = await this.state.storage.get(UPLOAD_OFFSET_KEY);
+    async head(request: IRequest): Promise<Response> {
+        const r2Key = request.params.id;
+
+        let offset: number | undefined = await this.state.storage.get(UPLOAD_OFFSET_KEY);
+        let uploadLength: number | undefined;
         if (offset == null) {
-            return error(404);
+            const headResponse = await this.retryBucket.head(r2Key);
+            if (headResponse == null) {
+                return error(404);
+            }
+            offset = headResponse.size;
+            uploadLength = headResponse.size;
+        } else {
+            const info: StoredUploadInfo | undefined = await this.state.storage.get(UPLOAD_INFO_KEY);
+            uploadLength = info?.uploadLength;
         }
 
-        return new Response('', {
-            headers: new Headers({
-                'Upload-Offset': offset.toString(),
-                'Upload-Expires': (await this.expirationTime()).toString(),
-                'Cache-Control': 'no-store',
-                'Tus-Resumable': TUS_VERSION
-            })
+        const headers = new Headers({
+            'Upload-Offset': offset.toString(),
+            'Upload-Expires': (await this.expirationTime()).toString(),
+            'Cache-Control': 'no-store',
+            'Tus-Resumable': TUS_VERSION
         });
+        if (uploadLength != null) {
+            headers.set('Upload-Length', uploadLength.toString());
+        }
+        return new Response(null, {headers});
     }
 
 
