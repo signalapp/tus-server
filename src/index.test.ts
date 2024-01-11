@@ -135,6 +135,35 @@ describe('request validation', () => {
         expect(res.status).toBe(400);
     });
 
+    it('rejects missing content-type', async () => {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            // needs a content-type
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await headerFor('abc'),
+                'Upload-Length': '1',
+                'Content-Length': '1'
+            },
+            body: 'a'
+        });
+        expect(res.status).toBe(415);
+    });
+
+    it('rejects bad content-type', async () => {
+        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await headerFor('abc'),
+                'Upload-Length': '1',
+                // should be application/offset+octet-stream
+                'Content-Type': 'application/octet-stream'
+            },
+        });
+        expect(res.status).toBe(415);
+    });
+
     it('accepts no trailing slash', async () => {
         const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}`, {
             method: 'POST',

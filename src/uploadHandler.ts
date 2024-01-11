@@ -149,9 +149,12 @@ export class UploadHandler {
         // The client may provide an initial request body (creation-with-upload)
         const contentType = request.headers.get('Content-Type');
         if (contentType != null && contentType !== 'application/offset+octet-stream') {
+            return error(415, 'create only supports application/offset+octet-stream content-type');
+        }
+        const contentLength = readIntFromHeader(request.headers, 'Content-Length');
+        if (!isNaN(contentLength) && contentLength > 0 && contentType == null) {
             return error(415, 'body requires application/offset+octet-stream content-type');
         }
-
         const hasContent = request.body != null && contentType != null;
         const uploadLength = readIntFromHeader(request.headers, 'Upload-Length');
         const uploadDeferLength = readIntFromHeader(request.headers, 'Upload-Defer-Length');
