@@ -239,12 +239,14 @@ describe('Tus', () => {
         });
     }
 
-    async function getRequest() {
+    async function getRequest(headers?: Record<string, string>) {
+        const h = headers || {};
+        Object.assign(h, {
+            'Authorization': await headerFor(name),
+        });
         return await worker.fetch(`http://localhost/${attachmentsPath}/${name}`, {
             method: 'GET',
-            headers: {
-                'Authorization': await headerFor(name),
-            }
+            headers: h
         });
     }
 
@@ -422,6 +424,61 @@ describe('Tus', () => {
         expect(head.headers.get('Upload-Offset')).toBe('4');
         expect(head.headers.get('Upload-Length')).toBe('4');
     });
+
+    it('handles ranged reads', async () => {
+        const bytes = new Uint8Array(1000);
+        crypto.getRandomValues(bytes);
+        const body = Buffer.from(bytes).toString('base64');
+        await createRequest({body: body, uploadLength: body.length});
+
+        const prefixResponse = await getRequest({'range': 'bytes=0-371'});
+        const prefix = await prefixResponse.text();
+        expect(prefixResponse.status).toBe(206);
+        expect(prefixResponse.headers.get('content-range')).toBe(`bytes 0-371/${body.length}`);
+        expect(prefix).toEqual(body.slice(0, 372));
+
+        const suffixResponse = await getRequest({'range': 'bytes=372-'});
+        const suffix = await suffixResponse.text();
+        expect(suffixResponse.status).toBe(206);
+        expect(suffixResponse.headers.get('content-range')).toBe(`bytes 372-${body.length - 1}/${body.length}`);
+        expect(suffix).toEqual(body.slice(372));
+    });
+
+    test.each(['nibbles=0-3', 'bytes=0-2,4-', 'bytes=zzz'])('ignores bad range: %s', async (arg: string) => {
+        await createRequest({body: 'hello', uploadLength: 5});
+        const response = await getRequest({'range': arg});
+        expect(response.status).toBe(206);
+        expect(await response.text()).toBe('hello');
+    });
+
+    it('handles suffix ranges', async () => {
+        const bytes = new Uint8Array(1000);
+        crypto.getRandomValues(bytes);
+        const body = Buffer.from(bytes).toString('base64');
+        await createRequest({body: body, uploadLength: body.length});
+        const response = await getRequest({'range': 'bytes=-99'});
+        expect(response.status).toBe(206);
+        const responseText = await response.text();
+        expect(responseText).toEqual(body.slice(body.length - 99, body.length));
+        expect(response.headers.get('content-range')).toEqual(`bytes ${body.length - 99}-${body.length - 1}/${body.length}`);
+    });
+
+    test.each([1, 2, 17])('handles reading chunks of length=%s', async (chunkSize: number) => {
+        const bytes = new Uint8Array(300);
+        crypto.getRandomValues(bytes);
+        const body = Buffer.from(bytes).toString('base64');
+        await createRequest({body: body, uploadLength: body.length});
+
+        let actual = '';
+        for (let offset = 0; offset < body.length; offset += chunkSize) {
+            const endIndex = Math.min(offset + chunkSize - 1, body.length - 1);
+            const response = await getRequest({'range': `bytes=${offset}-${endIndex}`});
+            expect(response.status).toBe(206);
+            expect(response.headers.get('content-range')).toBe(`bytes ${offset}-${endIndex}/${body.length}`);
+            actual += await response.text();
+        }
+        expect(actual).toEqual(body);
+    }, {timeout: 60000});
 
     test.each(
         [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1]

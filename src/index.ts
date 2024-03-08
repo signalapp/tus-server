@@ -125,7 +125,9 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
         return response;
     }
 
-    const object = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).get(requestId);
+    const object = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).get(requestId, {
+        range: request.headers
+    });
     if (object == null) {
         return error(404);
     }
@@ -144,11 +146,37 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
         headers.set(X_SIGNAL_CHECKSUM_SHA256, object.customMetadata[X_SIGNAL_CHECKSUM_SHA256]);
     }
 
-    response = new Response(object.body, {headers});
-    ctx.waitUntil(cache.put(cacheKey, response.clone()));
-    return response;
-
+    if (object.range != null && request.headers.has('range')) {
+        headers.set('content-range', rangeHeader(object.size, object.range));
+        response = new Response(object.body, {headers, status: 206});
+        // We do not cache partial content responses (cloudflare does not allow it)
+        // However, if we've previously cached the entire object and a ranged read
+        // request comes in for the object, cloudflare will satisfy the partial
+        // content request from the cache.
+        // See https://developers.cloudflare.com/workers/runtime-apis/cache
+        return response;
+    } else {
+        response = new Response(object.body, {headers});
+        ctx.waitUntil(cache.put(cacheKey, response.clone()));
+        return response;
+    }
 }
+
+function rangeHeader(objLen: number, r2Range: R2Range): string {
+    let startIndexInclusive = 0;
+    let endIndexInclusive = objLen - 1;
+    if ('offset' in r2Range && r2Range.offset != null) {
+        startIndexInclusive = r2Range.offset;
+    }
+    if ('length' in r2Range && r2Range.length != null) {
+        endIndexInclusive = startIndexInclusive + r2Range.length - 1;
+    }
+    if ('suffix' in r2Range) {
+        startIndexInclusive = objLen - r2Range.suffix;
+    }
+    return `bytes ${startIndexInclusive}-${endIndexInclusive}/${objLen}`;
+}
+
 
 async function optionsHandler(_request: IRequest, _env: Env): Promise<Response> {
     return new Response(null, {
