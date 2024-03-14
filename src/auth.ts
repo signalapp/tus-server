@@ -31,10 +31,16 @@ export async function createAuthWithClock(secret: string, maxAgeSeconds: number,
         },
 
         async validateCredentials(username: string, password: string): Promise<boolean> {
+            const truncatedSignatureLength = 10;
+
             const [ts, sig] = password.split(':');
-            const data = Buffer.from(username + ':' + ts, 'utf-8');
-            const expected = (await crypto.subtle.sign('HMAC', macKey, data)).slice(0, 10);
             const actual = Buffer.from(sig, 'hex');
+            if (actual.length !== truncatedSignatureLength) {
+                // timingSafeEqual throws if the buffers are not the same length
+                return false;
+            }
+            const data = Buffer.from(username + ':' + ts, 'utf-8');
+            const expected = (await crypto.subtle.sign('HMAC', macKey, data)).slice(0, truncatedSignatureLength);
             if (!crypto.subtle.timingSafeEqual(actual, expected)) {
                 return false;
             }

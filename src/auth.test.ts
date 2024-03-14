@@ -30,4 +30,18 @@ describe('Auth', async () => {
     it('rejects wrong-user credentials', async () => {
         expect(await validateAt(user, await generatePassAt(user + 'a', 1), 1)).toBe(false);
     });
+
+    it('rejects long signature', async () => {
+        let pass = await generatePassAt(user, 1);
+        // pass is ts:hex-sig, change the sig length
+        pass += 'aa';
+        expect(await validateAt(user, pass, 11)).toBe(false);
+    });
+
+    it('rejects short signature', async () => {
+        let pass = await generatePassAt(user, 1);
+        // pass is ts:hex-sig, change the sig length
+        pass = pass.slice(0, pass.length - 1);
+        expect(await validateAt(user, pass, 11)).toBe(false);
+    });
 });
