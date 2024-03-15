@@ -64,7 +64,7 @@ router
         uploadHandler)
 
     // --- backup handler methods ---
-    // GETs go straight to R2 and must include a subdir that is authenticated with a read permission
+    // GET/HEADs go straight to R2 and must include a subdir that is authenticated with a read permission
     // TUS operations go to a durable object and require authentication with a write permission
 
     // read the object :subdir/:id directly from R2, the request needs read permissions for :subdir
@@ -74,6 +74,13 @@ router
         withReadAuthorization,
         withSubdirAuthorizedKey,
         getHandler)
+    // head the object :subdir/:id directly from R2, the request needs read permissions for :subdir
+    .head(`/${BACKUP_PREFIX}/:subdir/:id+`,
+        withNamespace(BACKUP_PREFIX),
+        withAuthenticatedUser,
+        withReadAuthorization,
+        withSubdirAuthorizedKey,
+        headHandler)
     // TUS protocol operations, dispatched to an UploadHandler durable object
     .post(`/upload/${BACKUP_PREFIX}`,
         withNamespace(BACKUP_PREFIX),
@@ -131,21 +138,7 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
     if (object == null) {
         return error(404);
     }
-
-    const headers = new Headers();
-    object.writeHttpMetadata(headers);
-    headers.set('etag', object.httpEtag);
-
-    // the sha256 checksum was provided to R2 in the upload
-    if (object.checksums.sha256 != null) {
-        headers.set(X_SIGNAL_CHECKSUM_SHA256, toBase64(object.checksums.sha256));
-    }
-
-    // it was a multipart upload, so we were forced to write a sha256 checksum as a custom header
-    if (object.customMetadata?.[X_SIGNAL_CHECKSUM_SHA256] != null) {
-        headers.set(X_SIGNAL_CHECKSUM_SHA256, object.customMetadata[X_SIGNAL_CHECKSUM_SHA256]);
-    }
-
+    const headers = objectHeaders(object);
     if (object.range != null && request.headers.has('range')) {
         headers.set('content-range', rangeHeader(object.size, object.range));
         response = new Response(object.body, {headers, status: 206});
@@ -160,6 +153,47 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
         ctx.waitUntil(cache.put(cacheKey, response.clone()));
         return response;
     }
+}
+
+async function headHandler(request: IRequest, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const requestId = request.key;
+
+    const bucket: R2Bucket = request.namespace.bucket;
+    if (bucket == null) {
+        return error(404);
+    }
+
+    const cache = caches.default;
+    const cacheKey = new Request(new URL(request.url.toString()), request);
+    const response = await cache.match(cacheKey);
+    if (response != null) {
+        return response;
+    }
+
+    const head = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).head(requestId);
+    if (head == null) {
+        return error(404);
+    }
+    const headers = objectHeaders(head);
+    headers.set('Content-Length', head.size.toString());
+    return new Response(null, {status: 204, headers: headers});
+}
+
+function objectHeaders(object: R2Object): Headers {
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    headers.set('etag', object.httpEtag);
+
+    // the sha256 checksum was provided to R2 in the upload
+    if (object.checksums.sha256 != null) {
+        headers.set(X_SIGNAL_CHECKSUM_SHA256, toBase64(object.checksums.sha256));
+    }
+
+    // it was a multipart upload, so we were forced to write a sha256 checksum as a custom header
+    if (object.customMetadata?.[X_SIGNAL_CHECKSUM_SHA256] != null) {
+        headers.set(X_SIGNAL_CHECKSUM_SHA256, object.customMetadata[X_SIGNAL_CHECKSUM_SHA256]);
+    }
+    return headers;
 }
 
 function rangeHeader(objLen: number, r2Range: R2Range): string {

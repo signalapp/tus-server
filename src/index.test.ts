@@ -507,10 +507,7 @@ describe('Tus', () => {
         ]
     )('accepts correct checksum for length=%s, multiple-patches=%s)',
         async (bodySize: number, multiplePatches: boolean) => {
-            const digestStream = new crypto.DigestStream('SHA-256');
-            await body(bodySize, {pattern: 'test'}).pipeTo(digestStream);
-            const expectedChecksum = await digestStream.digest;
-
+            const expectedChecksum = await sha256(body(bodySize, {pattern: 'test'}));
             await createRequest({uploadLength: bodySize, checksum: new Uint8Array(expectedChecksum)});
             if (multiplePatches) {
                 await patchRequest(0, body(4, {pattern: 'test'}));
@@ -568,6 +565,40 @@ describe('tus-js-client-%s', () => {
             headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
         });
         expect(await resp.text()).toBe('test');
+    });
+});
+
+describe('completed object read operations', () => {
+    test.each(['HEAD', 'GET'])('404s unknown %s object', async (method: string) => {
+        const head = await worker.fetch(`http://localhost/${backupsPath}/subdir/does_not_exist`, {
+            method,
+            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
+        });
+        expect(head.status).toBe(404);
+    });
+
+    test.each(['HEAD', 'GET'])('populates headers for %s object', async (method: string) => {
+        const digest = toBase64(await sha256(body(4, {pattern: 'test'})));
+        await worker.fetch(`http://localhost/upload/${backupsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Authorization': await backupHeaderFor('subdir/a/b', 'write'),
+                'Tus-Resumable': '1.0.0',
+                'Upload-Metadata': `filename ${btoa('subdir/a/b')}`,
+                'Upload-Length': '4',
+                'Content-Type': 'application/offset+octet-stream',
+                [X_SIGNAL_CHECKSUM_SHA256]: digest
+            },
+            duplex: 'half',
+            body: body(4, {pattern: 'test'})
+        });
+        const resp = await worker.fetch(`http://localhost/${backupsPath}/subdir/a/b`, {
+            method: method,
+            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
+        });
+        expect(resp.status).toBe(method === 'HEAD' ? 204 : 200);
+        expect(resp.headers.get('etag')).toBe(await s3Etag(body(4, {pattern: 'test'})));
+        expect(resp.headers.get(X_SIGNAL_CHECKSUM_SHA256)).toEqual(digest);
     });
 });
 
@@ -691,6 +722,12 @@ function body(numBytes: number, bodyOptions?: BodyOptions): ReadableStream<Uint8
             queueChunk(controller);
         }
     });
+}
+
+async function sha256(body: ReadableStream<Uint8Array>): Promise<ArrayBuffer> {
+    const digestStream = new crypto.DigestStream('SHA-256');
+    await body.pipeTo(digestStream);
+    return await digestStream.digest;
 }
 
 // This implements the undocumented but de-facto standard algorithm S3 (and R2) uses
