@@ -596,7 +596,7 @@ describe('completed object read operations', () => {
             method: method,
             headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
         });
-        expect(resp.status).toBe(method === 'HEAD' ? 204 : 200);
+        expect(resp.status).toBe(200);
         expect(resp.headers.get('etag')).toBe(await s3Etag(body(4, {pattern: 'test'})));
         expect(resp.headers.get(X_SIGNAL_CHECKSUM_SHA256)).toEqual(digest);
     });

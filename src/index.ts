@@ -176,7 +176,7 @@ async function headHandler(request: IRequest, env: Env, ctx: ExecutionContext): 
     }
     const headers = objectHeaders(head);
     headers.set('Content-Length', head.size.toString());
-    return new Response(null, {status: 204, headers: headers});
+    return new Response(null, {status: 200, headers: headers});
 }
 
 function objectHeaders(object: R2Object): Headers {
