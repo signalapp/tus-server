@@ -37,18 +37,27 @@ export async function retry<T>(retryableFunc: () => Promise<T>, options: RetryOp
 
 // Check if an error returned by an R2 operation is a checksum mismatch error
 export function isR2ChecksumError(error: unknown): boolean {
+    // "put: The SHA-256 checksum you specified did not match what we received.
+    // You provided a SHA-256 checksum with value: <sha>
+    // Actual SHA-256 was: <sha> (10037)"
+    return isR2Error(error, msg => msg.includes('sha-256') || msg.includes('10037'));
+}
+
+export function isR2MultipartDoesNotExistError(error: unknown): boolean {
+    // "uploadPart: The specified multipart upload does not exist. (10024)"
+    return isR2Error(error, msg => msg.includes('multipart upload does not exist') || msg.includes('10024'));
+}
+
+function isR2Error(error: unknown, predicate: (msg: string) => boolean): boolean {
     // R2 bindings currently has no structured errors :( . We need to check for expected errors
     // by searching error messages. These usually contain a numeric error code, but not always
     if (error != null && error instanceof Object && Object.prototype.hasOwnProperty.call(error, 'message')) {
         const msg: string = (error as { message: string }).message;
-
-        // "put: The SHA-256 checksum you specified did not match what we received.
-        // You provided a SHA-256 checksum with value: <sha>
-        // Actual SHA-256 was: <sha> (10037)"
-        return msg.toLowerCase().includes('sha-256') || msg.includes('10037');
+        return predicate(msg.toLowerCase());
     }
     return false;
 }
+
 
 // Wraps R2Bucket operations with retries and exponential backoff
 export class RetryBucket {
@@ -107,16 +116,22 @@ export class RetryMultipartUpload {
 
     // don't allow streaming writes so the operation can be safely retried
     async uploadPart(partNumber: number, value: (ArrayBuffer | ArrayBufferView) | string | Blob): Promise<R2UploadedPart> {
-        return retry(() => this.r2MultipartUpload.uploadPart(partNumber, value), {params: this.params});
+        return retry(() => this.r2MultipartUpload.uploadPart(partNumber, value), this.retryOptions());
     }
 
     async abort(): ReturnType<R2MultipartUpload['abort']> {
-        return retry(() => this.r2MultipartUpload.abort(), {params: this.params});
+        // No need to retry aborts, the transactional will eventually be cleaned up anyway
+        return this.r2MultipartUpload.abort();
     }
 
     async complete(...parameters: Parameters<R2MultipartUpload['complete']>): ReturnType<R2MultipartUpload['complete']> {
-        return retry(() => this.r2MultipartUpload.complete(...parameters), {params: this.params});
+        return retry(() => this.r2MultipartUpload.complete(...parameters), this.retryOptions());
+    }
+
+    retryOptions(): RetryOptions {
+        return {
+            shouldRetry: error => !isR2MultipartDoesNotExistError(error),
+            params: this.params
+        };
     }
 }
-
-

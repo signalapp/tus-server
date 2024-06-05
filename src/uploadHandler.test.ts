@@ -58,6 +58,34 @@ describe('uploadHandler', () => {
         await expectStateEmpty(stub);
     });
 
+    it('cleans after a bad multipart tx', async () => {
+        const id = handler.idFromName('test123');
+        const stub = handler.get(id);
+        await runInDurableObject(stub, async (instance, state) => {
+            const storage = state.storage;
+
+            // invalid state: we claim to have a part written but the transaction won't exist
+            await storage.put('upload-info', {
+                uploadLength: 10,
+                multipartUploadId: 'fake-tx-id'
+            });
+            await storage.put('upload-offset', 5);
+            await storage.put('1', {
+                part: {partNumber: 1, etag: 'fake'},
+                length: 5
+            });
+        });
+
+        await expect(() => stub.fetch('http://localhost/upload/bucket/test123', {
+            method: 'PATCH',
+            headers: {'Upload-Offset': '5'},
+            body: '12345'
+        })).rejects.toThrowError('multipart upload does not exist');
+
+        // should clean up after unrecoverable error
+        await expectStateEmpty(stub);
+    });
+
     it('hydrates from cold storage', async () => {
         const id = handler.idFromName('test123');
         const tempkey = `temporary/${id.toString()}`;

@@ -7,7 +7,14 @@ import {AsyncLock, generateParts, readIntFromHeader, toBase64, WritableStreamBuf
 import {Env} from './index';
 import {Digester, noopDigester, sha256Digester} from './digest';
 import {parseChecksum, parseUploadMetadata} from './parse';
-import {DEFAULT_RETRY_PARAMS, isR2ChecksumError, RetryBucket, RetryMultipartUpload} from './retry';
+import {
+    DEFAULT_RETRY_PARAMS,
+    isR2ChecksumError,
+    isR2MultipartDoesNotExistError,
+    RetryBucket,
+    RetryMultipartUpload
+} from './retry';
+import {R2UploadedPart} from '@cloudflare/workers-types';
 
 export const TUS_VERSION = '1.0.0';
 
@@ -100,9 +107,10 @@ export class UploadHandler {
             } catch (e) {
                 if (e instanceof UnrecoverableError) {
                     try {
-                        const r2Key = (e as UnrecoverableError).r2Key;
+                        const ue = e as UnrecoverableError;
+                        console.error(`Upload for ${ue.r2Key} failed with unrecoverable error ${ue.message}`);
                         // this upload can never make progress, try to clean up
-                        await this.cleanup(r2Key);
+                        await this.cleanup(ue.r2Key);
                     } catch (cleanupError) {
                         // ignore errors cleaning up
                         console.error('error cleaning up ' + cleanupError);
@@ -326,7 +334,7 @@ export class UploadHandler {
                         this.multipart = await this.r2CreateMultipartUpload(r2Key, uploadInfo);
                     }
                     this.parts.push({
-                        part: await this.multipart.uploadPart(this.parts.length + 1, part.bytes),
+                        part: await this.r2UploadPart(r2Key, this.parts.length + 1, part.bytes),
                         length: part.bytes.byteLength
                     });
                     uploadOffset += part.bytes.byteLength;
@@ -352,7 +360,7 @@ export class UploadHandler {
                         await this.cleanup();
                     } else {
                         // upload the last part (can be less than the 5mb min part size), then complete the upload
-                        const uploadedPart = await this.multipart.uploadPart(this.parts.length + 1, part.bytes);
+                        const uploadedPart = await this.r2UploadPart(r2Key, this.parts.length + 1, part.bytes);
                         this.parts.push({part: uploadedPart, length: part.bytes.byteLength});
                         await this.r2CompleteMultipartUpload(r2Key, await digester.digest(), checksum);
                         uploadOffset += part.bytes.byteLength;
@@ -481,6 +489,22 @@ export class UploadHandler {
                 console.error(`checksum failure: ${e}`);
                 await this.cleanup();
                 throw new StatusError(415);
+            }
+            throw e;
+        }
+    }
+
+    async r2UploadPart(r2Key: string, partIndex: number, bytes: Uint8Array): Promise<R2UploadedPart> {
+        if (this.multipart == null) {
+            throw new UnrecoverableError('cannot call complete multipart with no multipart upload', r2Key);
+        }
+        try {
+            return await this.multipart.uploadPart(partIndex, bytes);
+        } catch (e) {
+            if (isR2MultipartDoesNotExistError(e)) {
+                // The multipart transaction we persisted no longer exists. It either expired, or it's possible we
+                // finished the transaction but failed to update the state afterwords. Either way, we should give up.
+                throw new UnrecoverableError(`multipart upload does not exist ${e}`, r2Key);
             }
             throw e;
         }
