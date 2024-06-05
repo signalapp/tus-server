@@ -116,7 +116,7 @@ export class UploadHandler {
     }
 
     fetch(request: Request): Promise<Response> {
-        return this.router.handle(request).then(json).catch(e => {
+        return this.router.fetch(request).then(json).catch(e => {
             if (e instanceof StatusError) {
                 return error(e);
             }

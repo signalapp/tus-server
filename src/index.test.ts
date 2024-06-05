@@ -21,6 +21,7 @@ let worker: UnstableDevWorker;
 beforeAll(async () => {
     worker = await unstable_dev('src/index.ts', {
         experimental: {disableExperimentalWarning: true},
+        // logLevel: 'debug',
         vars: {SHARED_AUTH_SECRET: secret}
     });
 });

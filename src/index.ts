@@ -109,7 +109,7 @@ export default {
         env: Env,
         ctx: ExecutionContext
     ): Promise<Response> {
-        return await router.handle(request, env, ctx).catch(e => {
+        return router.fetch(request, env, ctx).catch(e => {
             console.log('error: ' + e.stack);
             return error(e);
         }).then(json);
