@@ -1,47 +1,52 @@
 // Copyright 2023 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import {expect, it, test} from 'vitest';
-import {UploadHandler} from './uploadHandler';
-import {Env} from './index';
-
-const describe = setupMiniflareIsolatedStorage();
+import {expect, it, test, describe} from 'vitest';
+import {runInDurableObject, env, runDurableObjectAlarm} from 'cloudflare:test';
 
 const PART_SIZE = 1024 * 1024 * 5;
 
 describe('uploadHandler', () => {
-    const env: Env = getMiniflareBindings() as Env;
     const r2: R2Bucket = env.ATTACHMENT_BUCKET;
     const handler = env.ATTACHMENT_UPLOAD_HANDLER;
+
+    async function expectStateEmpty(stub: DurableObjectStub): Promise<void> {
+        await runInDurableObject(stub, async (instance, state) => {
+            expect((await state.storage.list()).size).toBe(0);
+        });
+    }
 
     it('cleans after alarms', async () => {
         const id = handler.newUniqueId();
         const stub = handler.get(id);
 
-        const resp = await stub.fetch('http://localhost/upload/bucket/', {
+        await stub.fetch('http://localhost/upload/bucket/', {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('test123')}`,
                 'Upload-Length': '10'
             }
         });
-        const storage = await getMiniflareDurableObjectStorage(id);
-        expect(await storage.get('upload-info')).toMatchObject({uploadLength: 10});
-        expect(await storage.get('upload-offset')).toBe(0);
-        await flushMiniflareDurableObjectAlarms();
-        expect((await storage.list()).size).toBe(0);
+        await runInDurableObject(stub, async (instance, state) => {
+            expect(await state.storage.get('upload-info')).toMatchObject({uploadLength: 10});
+            expect(await state.storage.get('upload-offset')).toBe(0);
+        });
+        expect(await runDurableObjectAlarm(stub)).toBe(true);
+        await expectStateEmpty(stub);
     });
 
     it('cleans after unrecoverable failure', async () => {
         const id = handler.idFromName('test123');
         const stub = handler.get(id);
-        const storage = await getMiniflareDurableObjectStorage(id);
+        await runInDurableObject(stub, async (instance, state) => {
+            const storage = state.storage;
 
-        // invalid state: temp object should be length 5, is only length 1
-        const tempkey = `temporary/${id.toString()}`;
-        await r2.put(tempkey, '1');
-        await storage.put('upload-info', {uploadLength: 10});
-        await storage.put('upload-offset', 5);
+            // invalid state: temp object should be length 5, is only length 1
+            const tempkey = `temporary/${id.toString()}`;
+            await r2.put(tempkey, '1');
+            await storage.put('upload-info', {uploadLength: 10});
+            await storage.put('upload-offset', 5);
+        });
 
         await expect(() => stub.fetch('http://localhost/upload/bucket/test123', {
             method: 'PATCH',
@@ -50,19 +55,19 @@ describe('uploadHandler', () => {
         })).rejects.toThrowError();
 
         // should clean up after unrecoverable error
-        expect((await storage.list()).size).toBe(0);
+        await expectStateEmpty(stub);
     });
 
     it('hydrates from cold storage', async () => {
         const id = handler.idFromName('test123');
-        const stub = handler.get(id);
-        const storage = await getMiniflareDurableObjectStorage(id);
-
         const tempkey = `temporary/${id.toString()}`;
-
         await r2.put(tempkey, '12345');
-        await storage.put('upload-info', {uploadLength: 10});
-        await storage.put('upload-offset', 5);
+        const stub = handler.get(id);
+        await runInDurableObject(stub, async (instance, state) => {
+            const storage = state.storage;
+            await storage.put('upload-info', {uploadLength: 10});
+            await storage.put('upload-offset', 5);
+        });
 
         const resp = await stub.fetch('http://localhost/upload/bucket/test123', {
             method: 'PATCH',
@@ -77,14 +82,14 @@ describe('uploadHandler', () => {
 
         // temporary should be gone
         expect(await r2.get(tempkey)).toBeNull();
+
         // all keys should be gone after success
-        expect((await storage.list()).size).toBe(0);
+        await expectStateEmpty(stub);
     });
 
     it('hydrates tx parts from cold storage', async () => {
         const id = handler.idFromName('test123');
         const stub = handler.get(id);
-        const storage = await getMiniflareDurableObjectStorage(id);
 
         const partBody = new Uint8Array(PART_SIZE);
         const tempkey = `temporary/${id.toString()}`;
@@ -92,14 +97,17 @@ describe('uploadHandler', () => {
         const part1 = await mp.uploadPart(1, partBody);
         await r2.put(tempkey, '12345');
 
-        await storage.put('upload-offset', partBody.length + 5);
-        await storage.put('upload-info', {
-            uploadLength: partBody.length + 10,
-            multipartUploadId: mp.uploadId
-        });
-        await storage.put('1', {
-            part: part1,
-            length: partBody.byteLength
+        runInDurableObject(stub, async (instance, state) => {
+            const storage = state.storage;
+            await storage.put('upload-offset', partBody.length + 5);
+            await storage.put('upload-info', {
+                uploadLength: partBody.length + 10,
+                multipartUploadId: mp.uploadId
+            });
+            await storage.put('1', {
+                part: part1,
+                length: partBody.byteLength
+            });
         });
 
         const resp = await stub.fetch('http://localhost/upload/bucket/test123', {
@@ -118,7 +126,7 @@ describe('uploadHandler', () => {
         // temporary should be gone
         expect(await r2.get(tempkey)).toBeNull();
         // all keys should be gone after success
-        expect((await storage.list()).size).toBe(0);
+        await expectStateEmpty(stub);
     });
 
     test.each(
@@ -130,17 +138,15 @@ describe('uploadHandler', () => {
             [0, 10, PART_SIZE]
         ]
     )('resumes from storage for chunks=[%s,%s,%s]', async (chunk1Size, chunk2Size, chunk3Size) => {
-        const id = handler.idFromName('test123');
-        const state = await getMiniflareDurableObjectState(id);
-
         const firstChunk = new Uint8Array(chunk1Size);
         const secondChunk = new Uint8Array(chunk2Size);
         const thirdChunk = new Uint8Array(chunk3Size);
 
         const totalLength = firstChunk.length + secondChunk.length + thirdChunk.length;
 
-        const oldObj = new UploadHandler(state, env, r2);
-        await runWithMiniflareDurableObjectGates(state, () => oldObj.fetch(new Request('http://localhost/upload/bucket', {
+        const id = handler.idFromName('test123');
+        let stub = handler.get(id);
+        await stub.fetch(new Request('http://localhost/upload/bucket', {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('test123')}`,
@@ -148,22 +154,21 @@ describe('uploadHandler', () => {
                 'Content-Type': 'application/offset+octet-stream'
             },
             body: firstChunk
-        })));
+        }));
 
-        await runWithMiniflareDurableObjectGates(state, () => oldObj.fetch(new Request('http://localhost/upload/bucket/test123', {
+        await stub.fetch(new Request('http://localhost/upload/bucket/test123', {
             method: 'PATCH',
             headers: {'Upload-Offset': firstChunk.length.toString()},
             body: secondChunk
-        })));
+        }));
 
         // create a new object from the same state
-        const newObj = new UploadHandler(state, env, r2);
-        await runWithMiniflareDurableObjectGates(state, () =>
-            newObj.fetch(new Request('http://localhost/upload/bucket/test123', {
-                method: 'PATCH',
-                body: thirdChunk,
-                headers: {'Upload-Offset': (firstChunk.length + secondChunk.length).toString()}
-            })));
+        stub = handler.get(id);
+        await stub.fetch(new Request('http://localhost/upload/bucket/test123', {
+            method: 'PATCH',
+            body: thirdChunk,
+            headers: {'Upload-Offset': (firstChunk.length + secondChunk.length).toString()}
+        }));
 
         const obj = await r2.get('test123');
         expect((await obj?.text())?.length).toBe(totalLength);

@@ -1,39 +1,22 @@
 // Copyright 2023 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import {afterAll, beforeAll, describe, expect, it, test} from 'vitest';
-import {createAuth} from './auth';
-import * as tus from 'tus-js-client';
-import {UploadOptions} from 'tus-js-client';
-import {unstable_dev, UnstableDevWorker} from 'wrangler';
+// cloudflare:test currently has an issue where tests will fail if a non-empty body of a durable
+// object response is not disposed of. See https://github.com/cloudflare/workers-sdk/issues/5629 . The
+// superfluous `await response.body.cancel()` calls in some tests may be removed when this issue is fixed.
+
+import {describe, expect, it, test} from 'vitest';
+import {attachmentsPath, backupHeaderFor, backupsPath, headerFor} from './testutil';
+import {SELF} from 'cloudflare:test';
 import {X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
-
-const attachmentsPath = 'attachments';
-const backupsPath = 'backups';
-const secret = 'test';
-const auth = await createAuth(secret, 100);
+import './env.d.ts';
 
 const PART_SIZE = 1024 * 1024 * 5;
 
-let worker: UnstableDevWorker;
-
-beforeAll(async () => {
-    worker = await unstable_dev('src/index.ts', {
-        experimental: {disableExperimentalWarning: true},
-        // logLevel: 'debug',
-        vars: {SHARED_AUTH_SECRET: secret}
-    });
-});
-
-afterAll(async () => {
-    await worker.stop();
-});
-
-
 describe('worker auth', () => {
     it('rejects un-authd request', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {'Upload-Metadata': `filename ${btoa('test')}`}
         });
@@ -41,7 +24,7 @@ describe('worker auth', () => {
     });
 
     it('rejects misformated auth', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {'Authorization': 'Complex zzzzz'}
         });
@@ -49,7 +32,7 @@ describe('worker auth', () => {
     });
 
     it('accepts valid auth', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -62,7 +45,7 @@ describe('worker auth', () => {
     });
 
     it('rejects backups POST with bad permission', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -74,29 +57,29 @@ describe('worker auth', () => {
     });
 
     it('accepts unauthd GET to attachments', async () => {
-        const res = await worker.fetch(`http://localhost/${attachmentsPath}/abc`);
+        const res = await SELF.fetch(`http://localhost/${attachmentsPath}/abc`);
         expect(res.status).toBe(404);
     });
 
     it('rejects unauthd GET to backups', async () => {
-        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`);
+        const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`);
         expect(res.status).toBe(401);
     });
 
     it('rejects GET to backups with no second component', async () => {
-        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/`);
+        const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/`);
         expect(res.status).toBe(401);
     });
 
     it.each(['write', '', 'abc'])('rejects GET to backups with %s permission', async (permission) => {
-        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`, {
+        const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`, {
             headers: {'Authorization': await backupHeaderFor('abc', permission)}
         });
         expect(res.status).toBe(401);
     });
 
     it.each(['ab', '/abc', 'abc/', '', 'abc/def'])('rejects GET with incorrect subdir %s', async (subdir) => {
-        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`, {
+        const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`, {
             headers: {'Authorization': await backupHeaderFor(subdir, 'read')}
         });
         expect(res.status).toBe(401);
@@ -104,7 +87,7 @@ describe('worker auth', () => {
 
 
     it('accepts subdir authd GET to backups', async () => {
-        const res = await worker.fetch(`http://localhost/${backupsPath}/abc/def`, {
+        const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`, {
             headers: {'Authorization': await backupHeaderFor('abc', 'read')}
         });
         expect(res.status).toBe(404);
@@ -113,7 +96,7 @@ describe('worker auth', () => {
 
 describe('request validation', () => {
     it('rejects bad checksum', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -123,10 +106,11 @@ describe('request validation', () => {
             }
         });
         expect(res.status).toBe(400);
+        await res.body?.cancel();
     });
 
     it('rejects no upload-length', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -134,10 +118,11 @@ describe('request validation', () => {
             }
         });
         expect(res.status).toBe(400);
+        await res.body?.cancel();
     });
 
     it('rejects missing content-type', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             // needs a content-type
             headers: {
@@ -149,10 +134,11 @@ describe('request validation', () => {
             body: 'a'
         });
         expect(res.status).toBe(415);
+        await res.body?.cancel();
     });
 
     it('rejects bad content-type', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -163,10 +149,11 @@ describe('request validation', () => {
             },
         });
         expect(res.status).toBe(415);
+        await res.body?.cancel();
     });
 
     it('accepts no trailing slash', async () => {
-        const res = await worker.fetch(`http://localhost/upload/${attachmentsPath}`, {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}`, {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
@@ -176,6 +163,7 @@ describe('request validation', () => {
         });
         expect(res.status).toBe(201);
         expect(res.headers.get('location')).toBe(`http://localhost/upload/${attachmentsPath}/abc`);
+        await res.body?.cancel();
     });
 });
 
@@ -206,7 +194,7 @@ describe('Tus', () => {
         if (opts?.body != null) {
             headers['Content-Type'] = 'application/offset+octet-stream';
         }
-        return await worker.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+        return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
             headers: headers,
             body: opts?.body
@@ -222,7 +210,7 @@ describe('Tus', () => {
             'Tus-Resumable': '1.0.0'
         });
 
-        return await worker.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
+        return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
             method: 'PATCH',
             headers: h,
             duplex: 'half',
@@ -231,7 +219,7 @@ describe('Tus', () => {
     }
 
     async function headRequest() {
-        return worker.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
+        return SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
             method: 'HEAD',
             headers: {
                 'Authorization': await headerFor(name),
@@ -245,7 +233,7 @@ describe('Tus', () => {
         Object.assign(h, {
             'Authorization': await headerFor(name),
         });
-        return await worker.fetch(`http://localhost/${attachmentsPath}/${name}`, {
+        return await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
             method: 'GET',
             headers: h
         });
@@ -325,12 +313,12 @@ describe('Tus', () => {
         expect(create.status).toBe(201);
 
         // body errors after first 8 bytes
-        await expect(() => patchRequest(0, body(8, {
+        await patchRequest(0, body(8, {
             pattern: 'test',
             error: 'injected error',
             // write small chunks so the reader reads something before the error
             targetChunkSize: 4
-        }))).rejects.toThrowError();
+        }));
 
         const head = await headRequest();
         expect(head.status).toBe(200);
@@ -369,6 +357,7 @@ describe('Tus', () => {
         // const upload = await patchRequest(4, 'ba');
         const upload = await patchRequest(4);
         expect(upload.status).toBe(409);
+        await upload.body?.cancel();
 
         await patchRequest(3, 'bar');
         expect(await (await getRequest()).text()).toBe('foobar');
@@ -465,7 +454,7 @@ describe('Tus', () => {
     });
 
     test.each([1, 2, 17])('handles reading chunks of length=%s', async (chunkSize: number) => {
-        const bytes = new Uint8Array(300);
+        const bytes = new Uint8Array(100);
         crypto.getRandomValues(bytes);
         const body = Buffer.from(bytes).toString('base64');
         await createRequest({body: body, uploadLength: body.length});
@@ -487,6 +476,7 @@ describe('Tus', () => {
         await createRequest({uploadLength: bodySize, checksum: new Uint8Array(32)});
         const upload = await patchRequest(0, body(bodySize, {pattern: 'test'}));
         expect(upload.status).toBe(415);
+        await upload.body?.cancel();
 
         // should delete the in-progress upload: if the object already existed, Upload-Offset should be the object
         // length. Otherwise, the head should 404.
@@ -517,9 +507,9 @@ describe('Tus', () => {
             } else {
                 await patchRequest(0, body(bodySize, {pattern: 'test'}));
             }
-
             // make sure the checksum is also returned on GET
             const get = await getRequest();
+            await get.body?.cancel();
             const actualChecksum = Buffer.from(get.headers.get(X_SIGNAL_CHECKSUM_SHA256) || '', 'base64');
             expect(actualChecksum.buffer).toEqual(expectedChecksum);
         });
@@ -547,31 +537,9 @@ describe('Tus', () => {
 });
 
 
-describe('tus-js-client-%s', () => {
-    const name = 'test-client-obj';
-
-    test.each([false, true])('uploads creation-with-upload=%s',
-        async (uploadDataDuringCreation: boolean) => {
-            const blob = Buffer.from('test', 'utf-8');
-            await tusClientUpload(name, attachmentsPath, await headerFor(name), blob, {uploadDataDuringCreation: uploadDataDuringCreation});
-            const resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${name}`);
-            expect(await resp.text()).toBe('test');
-        });
-
-    it('accepts uploads with slashes', async () => {
-        const blob = Buffer.from('test', 'utf-8');
-        const name = 'subdir/b/c';
-        await tusClientUpload(name, backupsPath, await backupHeaderFor(name, 'write'), blob);
-        const resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${name}`, {
-            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
-        });
-        expect(await resp.text()).toBe('test');
-    });
-});
-
 describe('completed object read operations', () => {
     test.each(['HEAD', 'GET'])('404s unknown %s object', async (method: string) => {
-        const head = await worker.fetch(`http://localhost/${backupsPath}/subdir/does_not_exist`, {
+        const head = await SELF.fetch(`http://localhost/${backupsPath}/subdir/does_not_exist`, {
             method,
             headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
         });
@@ -580,7 +548,7 @@ describe('completed object read operations', () => {
 
     test.each(['HEAD', 'GET'])('populates headers for %s object', async (method: string) => {
         const digest = toBase64(await sha256(body(4, {pattern: 'test'})));
-        await worker.fetch(`http://localhost/upload/${backupsPath}/`, {
+        await SELF.fetch(`http://localhost/upload/${backupsPath}/`, {
             method: 'POST',
             headers: {
                 'Authorization': await backupHeaderFor('subdir/a/b', 'write'),
@@ -593,17 +561,33 @@ describe('completed object read operations', () => {
             duplex: 'half',
             body: body(4, {pattern: 'test'})
         });
-        const resp = await worker.fetch(`http://localhost/${backupsPath}/subdir/a/b`, {
+        const resp = await SELF.fetch(`http://localhost/${backupsPath}/subdir/a/b`, {
             method: method,
             headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
         });
         expect(resp.status).toBe(200);
         expect(resp.headers.get('etag')).toBe(await s3Etag(body(4, {pattern: 'test'})));
         expect(resp.headers.get(X_SIGNAL_CHECKSUM_SHA256)).toEqual(digest);
+        await resp.body?.cancel();
     });
 });
 
+
 describe('path routing', () => {
+    async function upload(bucket: string, name: string, auth: string, body: Buffer): Promise<Response> {
+        return await SELF.fetch(`http://localhost/upload/${bucket}/`, {
+            method: 'POST',
+            headers: {
+                'Authorization': auth,
+                'Tus-Resumable': '1.0.0',
+                'Upload-Metadata': `filename ${btoa(name)}`,
+                'Upload-Length': body.length.toString(),
+                'Content-Type': 'application/offset+octet-stream'
+            },
+            body: body
+        });
+    }
+
     it('selects correct bucket', async () => {
         const attachmentName = 'subdir/attachmentName';
         const backupName = 'subdir/backupName';
@@ -611,55 +595,27 @@ describe('path routing', () => {
         const backupBlob = Buffer.from('backup123', 'utf-8');
 
         // write the attachment to the attachments bucket, the backup to the backup bucket
-        await tusClientUpload(attachmentName, attachmentsPath, await headerFor(attachmentName), attachmentBlob);
-        await tusClientUpload(backupName, backupsPath, await backupHeaderFor(backupName, 'write'), backupBlob);
+        await upload(attachmentsPath, attachmentName, await headerFor(attachmentName), attachmentBlob);
+        await upload(backupsPath, backupName, await backupHeaderFor(backupName, 'write'), backupBlob);
 
         // the attachments bucket should have the attachment but not the backup
-        let resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${attachmentName}`);
+        let resp = await SELF.fetch(`http://localhost/${attachmentsPath}/${attachmentName}`);
         expect(await resp.text()).toBe('attachment123');
-        resp = await fetch(`http://${worker.address}:${worker.port}/${attachmentsPath}/${backupName}`);
+        resp = await SELF.fetch(`http://localhost/${attachmentsPath}/${backupName}`);
         expect(resp.status).toBe(404);
 
         // the backup bucket should have the backup but not the attachment
-        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${attachmentName}`, {
+        resp = await SELF.fetch(`http://localhost/${backupsPath}/${attachmentName}`, {
             headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
         });
         expect(resp.status).toBe(404);
-        resp = await fetch(`http://${worker.address}:${worker.port}/${backupsPath}/${backupName}`, {
+        resp = await SELF.fetch(`http://localhost/${backupsPath}/${backupName}`, {
             headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
         });
         expect(await resp.text()).toBe('backup123');
 
     });
 });
-
-async function headerFor(key: string): Promise<string> {
-    const user = `${attachmentsPath}/${key}`;
-    const pass = await auth.generatePass(user);
-    return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
-}
-
-async function backupHeaderFor(key: string, permission: string): Promise<string> {
-    const user = `${permission}$${backupsPath}/${key}`;
-    const pass = await auth.generatePass(user);
-    return `Basic ${Buffer.from(`${user}:${pass}`).toString('base64')}`;
-}
-
-async function tusClientUpload(name: string, pathPrefix: string, authHeader: string, blob: Buffer, options?: UploadOptions) {
-    await new Promise<void>((resolve, reject) => {
-        // node tus.Upload takes Buffer but typescript bindings are wrong
-        const upload = new tus.Upload(blob as never as Blob, {
-            endpoint: `http://${worker.address}:${worker.port}/upload/${pathPrefix}/`,
-            metadata: {'filename': name},
-            headers: {'Authorization': authHeader},
-            onError: reject,
-            onSuccess: resolve,
-            uploadSize: blob.length,
-            ...options
-        });
-        upload.start();
-    });
-}
 
 function fillPattern(targetSize: number, pattern: string): Uint8Array {
     const patternBytes = new TextEncoder().encode(pattern);

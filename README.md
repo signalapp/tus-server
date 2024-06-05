@@ -30,7 +30,7 @@ wrangler dev
 
 To run unit tests,
 ```
-NODE_OPTIONS=--experimental-vm-modules npm test
+npm test
 ```
 
 # Deploying
