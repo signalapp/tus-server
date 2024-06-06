@@ -12,13 +12,11 @@ export function readIntFromHeader(headers: Headers, name: string): number {
     return parseInt(headerString);
 }
 
-export function toBase64(v: Uint8Array | ArrayBuffer | ArrayBufferView): string {
+export function toBase64(v: Uint8Array | ArrayBuffer): string {
     if (v instanceof Uint8Array) {
         return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('base64');
-    } else if (v instanceof ArrayBuffer) {
-        return Buffer.from(v).toString('base64');
     } else {
-        return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('base64');
+        return Buffer.from(v).toString('base64');
     }
 }
 
