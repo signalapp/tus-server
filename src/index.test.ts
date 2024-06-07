@@ -568,6 +568,12 @@ describe('completed object read operations', () => {
         expect(resp.status).toBe(200);
         expect(resp.headers.get('etag')).toBe(await s3Etag(body(4, {pattern: 'test'})));
         expect(resp.headers.get(X_SIGNAL_CHECKSUM_SHA256)).toEqual(digest);
+
+        const lastModified: Date = new Date(resp.headers.get('Last-Modified')!);
+        expect(lastModified).toBeTruthy();
+        const diffSeconds = Math.abs(new Date().getTime() - lastModified.getTime()) / 1000;
+        expect(diffSeconds < 60).toBe(true);
+
         await resp.body?.cancel();
     });
 });

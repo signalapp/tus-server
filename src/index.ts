@@ -38,7 +38,7 @@ router
     .options('/upload/:bucket', optionsHandler)
 
     // --- attachment handler methods ---
-    // GETs go straight to R2 and are publicly accessible
+    // GET/HEADs go straight to R2 and are publicly accessible
     // TUS operations go to a durable object and require authentication
 
     // read the object :id directly from R2
@@ -46,6 +46,11 @@ router
         withNamespace(ATTACHMENT_PREFIX),
         withUnauthenticatedKeyFromId,
         getHandler)
+    // head the object :id directly from R2
+    .head(`/${ATTACHMENT_PREFIX}/:id+`,
+        withNamespace(ATTACHMENT_PREFIX),
+        withUnauthenticatedKeyFromId,
+        headHandler)
     // TUS protocol operations, dispatched to an UploadHandler durable object
     .post(`/upload/${ATTACHMENT_PREFIX}`,
         withNamespace(ATTACHMENT_PREFIX),
@@ -193,6 +198,10 @@ function objectHeaders(object: R2Object): Headers {
     if (object.customMetadata?.[X_SIGNAL_CHECKSUM_SHA256] != null) {
         headers.set(X_SIGNAL_CHECKSUM_SHA256, object.customMetadata[X_SIGNAL_CHECKSUM_SHA256]);
     }
+
+    // RFC-9110 HTTP-date compliant
+    headers.set('Last-Modified', object.uploaded.toUTCString());
+
     return headers;
 }
 
