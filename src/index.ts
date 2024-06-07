@@ -1,7 +1,7 @@
 // Copyright 2023 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
 
-import {error, IRequest, json, Router} from 'itty-router';
+import {error, IRequest, json, Router, StatusError} from 'itty-router';
 import {Auth, createAuth} from './auth';
 import {Buffer} from 'node:buffer';
 import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
@@ -116,7 +116,10 @@ export default {
     ): Promise<Response> {
         return router.fetch(request, env, ctx).catch(e => {
             console.log('error: ' + e.stack);
-            return error(e);
+            if (e instanceof StatusError) {
+                return error(e);
+            }
+            throw e;
         }).then(json);
     }
 };
