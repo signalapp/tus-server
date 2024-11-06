@@ -34,6 +34,9 @@ export async function createAuthWithClock(secret: string, maxAgeSeconds: number,
             const truncatedSignatureLength = 10;
 
             const [ts, sig] = password.split(':');
+            if (!ts || !sig) {
+                return false;
+            }
             const actual = Buffer.from(sig, 'hex');
             if (actual.length !== truncatedSignatureLength) {
                 // timingSafeEqual throws if the buffers are not the same length
@@ -56,4 +59,3 @@ export async function createAuthWithClock(secret: string, maxAgeSeconds: number,
 export async function createAuth(secret: string, maxAgeSeconds: number): Promise<Auth> {
     return await createAuthWithClock(secret, maxAgeSeconds, () => Math.floor(new Date().getTime() / 1000));
 }
-

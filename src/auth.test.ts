@@ -31,6 +31,13 @@ describe('Auth', async () => {
         expect(await validateAt(user, await generatePassAt(user + 'a', 1), 1)).toBe(false);
     });
 
+    it('rejects missing signature', async () => {
+        let pass = await generatePassAt(user, 1);
+        // pass is ts:hex-sig, remove the signature
+        pass = pass.substring(0, pass.indexOf(':'));
+        expect(await validateAt(user, pass, 11)).toBe(false);
+    });
+
     it('rejects long signature', async () => {
         let pass = await generatePassAt(user, 1);
         // pass is ts:hex-sig, change the sig length

@@ -312,7 +312,7 @@ function parseBasicAuth(auth: string): Credentials | ParseError {
 
     const [username, ...rest] = decoded.split(':');
     const password = rest.join(':');
-    if (!password) {
+    if (!username || !password) {
         return {state: 'error', error: error(400, 'invalid auth format')};
     }
     return {state: 'success', user: username, password: password};
