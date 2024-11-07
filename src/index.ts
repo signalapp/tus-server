@@ -7,7 +7,7 @@ import {Buffer} from 'node:buffer';
 import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
-import {DEFAULT_RETRY_PARAMS, RetryBucket} from './retry';
+import {DEFAULT_RETRY_PARAMS, isR2RangedReadHeaderError, RetryBucket} from './retry';
 
 export {UploadHandler, BackupUploadHandler, AttachmentUploadHandler} from './uploadHandler';
 
@@ -140,9 +140,18 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
         return response;
     }
 
-    const object = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).get(requestId, {
-        range: request.headers
-    });
+    let object;
+    try {
+        object = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).get(requestId, {
+            range: request.headers
+        });
+    } catch (e) {
+        if (isR2RangedReadHeaderError(e)) {
+            console.error(`Request for ${requestId} had unsatisfiable range ${request.headers.get('range')} : ${e}`);
+            return error(416);
+        }
+        throw e;
+    }
     if (object == null) {
         return error(404);
     }

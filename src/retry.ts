@@ -43,9 +43,16 @@ export function isR2ChecksumError(error: unknown): boolean {
     return isR2Error(error, msg => msg.includes('sha-256') || msg.includes('10037'));
 }
 
+// Check if an error returned by an R2 operation is a multipart DNE error
 export function isR2MultipartDoesNotExistError(error: unknown): boolean {
     // "uploadPart: The specified multipart upload does not exist. (10024)"
     return isR2Error(error, msg => msg.includes('multipart upload does not exist') || msg.includes('10024'));
+}
+
+// Check if an error returned by an R2 operation is a ranged read header error
+export function isR2RangedReadHeaderError(error: unknown): boolean {
+    // "get: The requested range is not satisfiable (10039)"
+    return isR2Error(error, msg => msg.includes('requested range is not satisfiable') || msg.includes('10039'));
 }
 
 function isR2Error(error: unknown, predicate: (msg: string) => boolean): boolean {
@@ -74,7 +81,10 @@ export class RetryBucket {
     }
 
     async get(...parameters: Parameters<R2Bucket['get']>): ReturnType<R2Bucket['get']> {
-        return retry(() => this.bucket.get(...parameters), {params: this.params});
+        return retry(() => this.bucket.get(...parameters), {
+            params: this.params,
+            shouldRetry: error => !isR2RangedReadHeaderError(error)
+        });
     }
 
     async delete(...parameters: Parameters<R2Bucket['delete']>): ReturnType<R2Bucket['delete']> {
