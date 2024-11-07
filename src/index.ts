@@ -7,7 +7,7 @@ import {Buffer} from 'node:buffer';
 import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
-import {DEFAULT_RETRY_PARAMS, isR2RangedReadHeaderError, RetryBucket} from './retry';
+import {DEFAULT_RETRY_PARAMS, retry, isR2RangedReadHeaderError, RetryBucket,} from './retry';
 
 export {UploadHandler, BackupUploadHandler, AttachmentUploadHandler} from './uploadHandler';
 
@@ -255,13 +255,24 @@ async function uploadHandler(request: IRequest, env: Env): Promise<Response> {
         return error(500, 'invalid bucket configuration');
     }
 
-    const handler = durableObjNs.get(durableObjNs.idFromName(requestId));
-    return await handler.fetch(request.url, {
-        body: request.body,
-        method: request.method,
-        headers: request.headers,
-        signal: AbortSignal.timeout(DO_CALL_TIMEOUT)
-    });
+    return retry(async () => {
+        const handler = durableObjNs.get(durableObjNs.idFromName(requestId));
+        return await handler.fetch(request.url, {
+            body: request.body,
+            method: request.method,
+            headers: request.headers,
+            signal: AbortSignal.timeout(DO_CALL_TIMEOUT)
+        });
+    }, {params: DEFAULT_RETRY_PARAMS, shouldRetry: isRetryableDurableObjectError});
+}
+
+// Check if the error has the retryable flag set. This generally indicates a transient cloudflare system error
+// See https://developers.cloudflare.com/durable-objects/best-practices/error-handling/
+function isRetryableDurableObjectError(err: unknown): boolean {
+    if (err != null && err instanceof Object && Object.prototype.hasOwnProperty.call(err, 'retryable')) {
+        return (err as { retryable: boolean }).retryable;
+    }
+    return false;
 }
 
 interface Namespace {
