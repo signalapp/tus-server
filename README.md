@@ -35,6 +35,10 @@ npm test
 
 # Deploying
 
+## One click deployments
+
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/signalapp/tus-server)
+
 ## One time setup
 1. Create an R2 bucket and update the binding in `wrangler.toml`
 2. Add a base64 encoded shared auth secret with `wrangler secret put SHARED_AUTH_SECRET`
