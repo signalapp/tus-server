@@ -205,7 +205,7 @@ export class UploadHandler {
 
     // get the current upload offset to resume an upload
     async head(request: IRequest): Promise<Response> {
-        const r2Key = request.params.id;
+        const r2Key = request.params.id!;
 
         let offset: number | undefined = await this.state.storage.get(UPLOAD_OFFSET_KEY);
         let uploadLength: number | undefined;
@@ -236,7 +236,7 @@ export class UploadHandler {
 
     // append to the upload at the current upload offset
     async patch(request: IRequest): Promise<Response> {
-        const r2Key = request.params.id;
+        const r2Key = request.params.id!;
 
         let uploadOffset: number | undefined = await this.state.storage.get(UPLOAD_OFFSET_KEY);
         if (uploadOffset == null) {

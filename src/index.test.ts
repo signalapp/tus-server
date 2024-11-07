@@ -715,7 +715,7 @@ async function s3Etag(body: ReadableStream<Uint8Array>): Promise<string> {
     }
     md5sums.push(await crypto.subtle.digest('md5', mem.subarray(0, offset)));
     if (md5sums.length == 1) {
-        return `"${Buffer.from(md5sums[0]).toString('hex')}"`;
+        return `"${Buffer.from(md5sums[0]!).toString('hex')}"`;
     }
     const nestedMd5 = await crypto.subtle.digest('MD5', await new Blob(md5sums).arrayBuffer());
     return `"${Buffer.from(nestedMd5).toString('hex')}-${md5sums.length}"`;

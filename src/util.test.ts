@@ -49,7 +49,7 @@ describe('AsyncLock', () => {
         // finishing previous request should allow next one to proceed
         for (let i = 0; i < 10; i++) {
             release();
-            release = await (waiters[i].promise);
+            release = await (waiters[i]!.promise);
             expect(waiters.slice(i + 1).every(waiter => !waiter.done)).toBeTruthy();
         }
     });
