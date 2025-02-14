@@ -125,7 +125,7 @@ export default {
 };
 
 
-async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function getHandler(request: IRequest, _env: Env, ctx: ExecutionContext): Promise<Response> {
     const requestId = request.key;
 
     const bucket: R2Bucket = request.namespace.bucket;
@@ -172,7 +172,7 @@ async function getHandler(request: IRequest, env: Env, ctx: ExecutionContext): P
     }
 }
 
-async function headHandler(request: IRequest, env: Env, ctx: ExecutionContext): Promise<Response> {
+async function headHandler(request: IRequest, _env: Env, _ctx: ExecutionContext): Promise<Response> {
     const requestId = request.key;
 
     const bucket: R2Bucket = request.namespace.bucket;
@@ -246,7 +246,7 @@ async function optionsHandler(_request: IRequest, _env: Env): Promise<Response> 
 }
 
 // TUS protocol requests (POST/PATCH/HEAD) that get forwarded to a durable object
-async function uploadHandler(request: IRequest, env: Env): Promise<Response> {
+async function uploadHandler(request: IRequest, _env: Env): Promise<Response> {
     const requestId: string = request.key;
 
     // The id of the DurableObject is derived from the authenticated upload id provided by the requester

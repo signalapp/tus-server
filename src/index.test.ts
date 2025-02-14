@@ -213,7 +213,6 @@ describe('Tus', () => {
         return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
             method: 'PATCH',
             headers: h,
-            duplex: 'half',
             body: body
         });
     }
@@ -453,7 +452,7 @@ describe('Tus', () => {
         expect(response.headers.get('content-range')).toEqual(`bytes ${body.length - 99}-${body.length - 1}/${body.length}`);
     });
 
-    test.each([1, 2, 17])('handles reading chunks of length=%s', async (chunkSize: number) => {
+    test.each([1, 2, 17])('handles reading chunks of length=%s', {timeout: 60000}, async (chunkSize: number) => {
         const bytes = new Uint8Array(100);
         crypto.getRandomValues(bytes);
         const body = Buffer.from(bytes).toString('base64');
@@ -468,7 +467,7 @@ describe('Tus', () => {
             actual += await response.text();
         }
         expect(actual).toEqual(body);
-    }, {timeout: 60000});
+    });
 
     test.each(
         [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1]
@@ -517,7 +516,7 @@ describe('Tus', () => {
     // parameterized test of boundary conditions
     test.each(
         [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1, PART_SIZE * 10 + 1]
-    )('upload(%s bytes)',
+    )('upload(%s bytes)', {timeout: 60000},
         async (uploadSize) => {
             const create = await createRequest({uploadLength: uploadSize});
             expect(create.status).toBe(201);
@@ -532,7 +531,7 @@ describe('Tus', () => {
 
             const expectedEtag = await s3Etag(body(uploadSize, {pattern: 'test'}));
             expect(get.headers.get('etag')).toBe(expectedEtag);
-        }, {timeout: 60000});
+        });
 
 });
 
@@ -558,7 +557,6 @@ describe('completed object read operations', () => {
                 'Content-Type': 'application/offset+octet-stream',
                 [X_SIGNAL_CHECKSUM_SHA256]: digest
             },
-            duplex: 'half',
             body: body(4, {pattern: 'test'})
         });
         const resp = await SELF.fetch(`http://localhost/${backupsPath}/subdir/a/b`, {

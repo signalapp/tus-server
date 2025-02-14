@@ -11,7 +11,7 @@ describe('uploadHandler', () => {
     const handler = env.ATTACHMENT_UPLOAD_HANDLER;
 
     async function expectStateEmpty(stub: DurableObjectStub): Promise<void> {
-        await runInDurableObject(stub, async (instance, state) => {
+        await runInDurableObject(stub, async (_instance, state) => {
             expect((await state.storage.list()).size).toBe(0);
         });
     }
@@ -27,7 +27,7 @@ describe('uploadHandler', () => {
                 'Upload-Length': '10'
             }
         });
-        await runInDurableObject(stub, async (instance, state) => {
+        await runInDurableObject(stub, async (_instance, state) => {
             expect(await state.storage.get('upload-info')).toMatchObject({uploadLength: 10});
             expect(await state.storage.get('upload-offset')).toBe(0);
         });
@@ -38,7 +38,7 @@ describe('uploadHandler', () => {
     it('cleans after unrecoverable failure', async () => {
         const id = handler.idFromName('test123');
         const stub = handler.get(id);
-        await runInDurableObject(stub, async (instance, state) => {
+        await runInDurableObject(stub, async (_instance, state) => {
             const storage = state.storage;
 
             // invalid state: temp object should be length 5, is only length 1
@@ -61,7 +61,7 @@ describe('uploadHandler', () => {
     it('cleans after a bad multipart tx', async () => {
         const id = handler.idFromName('test123');
         const stub = handler.get(id);
-        await runInDurableObject(stub, async (instance, state) => {
+        await runInDurableObject(stub, async (_instance, state) => {
             const storage = state.storage;
 
             // invalid state: we claim to have a part written but the transaction won't exist
@@ -91,7 +91,7 @@ describe('uploadHandler', () => {
         const tempkey = `temporary/${id.toString()}`;
         await r2.put(tempkey, '12345');
         const stub = handler.get(id);
-        await runInDurableObject(stub, async (instance, state) => {
+        await runInDurableObject(stub, async (_instance, state) => {
             const storage = state.storage;
             await storage.put('upload-info', {uploadLength: 10});
             await storage.put('upload-offset', 5);
@@ -125,7 +125,7 @@ describe('uploadHandler', () => {
         const part1 = await mp.uploadPart(1, partBody);
         await r2.put(tempkey, '12345');
 
-        runInDurableObject(stub, async (instance, state) => {
+        await runInDurableObject(stub, async (_instance, state) => {
             const storage = state.storage;
             await storage.put('upload-offset', partBody.length + 5);
             await storage.put('upload-info', {

@@ -7,10 +7,10 @@
 import {afterAll, beforeAll, describe, expect, it, test} from 'vitest';
 import * as tus from 'tus-js-client';
 import {UploadOptions} from 'tus-js-client';
-import {unstable_dev, UnstableDevWorker} from 'wrangler';
+import {unstable_dev, Unstable_DevWorker} from 'wrangler';
 import {attachmentsPath, backupHeaderFor, backupsPath, headerFor, secret} from '../src/testutil';
 
-let worker: UnstableDevWorker;
+let worker: Unstable_DevWorker;
 
 beforeAll(async () => {
     worker = await unstable_dev('src/index.ts', {
@@ -31,7 +31,7 @@ async function tusClientUpload(name: string, pathPrefix: string, authHeader: str
             metadata: {'filename': name},
             headers: {'Authorization': authHeader},
             onError: reject,
-            onSuccess: resolve,
+            onSuccess: _payload => resolve(),
             uploadSize: blob.length,
             ...options
         });
