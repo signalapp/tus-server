@@ -35,6 +35,11 @@ export async function retry<T>(retryableFunc: () => Promise<T>, options: RetryOp
     }
 }
 
+// Check if an error returned by an R2 operation is a rate-limit error
+export function isR2RateLimitError(error: unknown): boolean {
+    return isR2Error(error, msg => msg.includes('10058'));
+}
+
 // Check if an error returned by an R2 operation is a checksum mismatch error
 export function isR2ChecksumError(error: unknown): boolean {
     // "put: The SHA-256 checksum you specified did not match what we received.

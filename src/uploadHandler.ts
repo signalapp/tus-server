@@ -10,7 +10,7 @@ import {parseChecksum, parseUploadMetadata} from './parse';
 import {
     DEFAULT_RETRY_PARAMS,
     isR2ChecksumError,
-    isR2MultipartDoesNotExistError,
+    isR2MultipartDoesNotExistError, isR2RateLimitError,
     RetryBucket,
     RetryMultipartUpload
 } from './retry';
@@ -490,6 +490,9 @@ export class UploadHandler {
                 await this.cleanup();
                 throw new StatusError(415);
             }
+            if (isR2RateLimitError(e)) {
+                console.log(`Rate-limit exceeded on PUT for key ${r2Key}`);
+            }
             throw e;
         }
     }
@@ -506,6 +509,9 @@ export class UploadHandler {
                 // finished the transaction but failed to update the state afterwords. Either way, we should give up.
                 throw new UnrecoverableError(`multipart upload does not exist ${e}`, r2Key);
             }
+            if (isR2RateLimitError(e)) {
+                console.log(`Rate-limit exceeded on upload part for key ${r2Key}`);
+            }
             throw e;
         }
     }
@@ -520,7 +526,14 @@ export class UploadHandler {
             await this.checkChecksum(r2Key, expectedChecksum, actualChecksum);
         }
 
-        await this.multipart.complete(this.parts.map(storedPart => storedPart.part));
+        try {
+            await this.multipart.complete(this.parts.map(storedPart => storedPart.part));
+        } catch (e) {
+            if (isR2RateLimitError(e)) {
+                console.log(`Rate-limit exceeded on complete multipart for key ${r2Key}`);
+            }
+            throw e;
+        }
 
         // Otherwise we have to compute the digest from the finished upload
         if (actualChecksum == null && expectedChecksum != null) {

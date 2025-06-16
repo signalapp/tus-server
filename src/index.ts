@@ -115,7 +115,7 @@ export default {
         ctx: ExecutionContext
     ): Promise<Response> {
         return router.fetch(request, env, ctx).catch(e => {
-            console.log('error: ' + e.stack);
+            console.log(`error processing ${request.method}:${request.url}: ${e.stack}`);
             if (e instanceof StatusError) {
                 return error(e);
             }
