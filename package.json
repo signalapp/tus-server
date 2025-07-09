@@ -3,13 +3,13 @@
   "version": "0.8.0",
   "type": "module",
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.5.41",
+    "@cloudflare/vitest-pool-workers": "^0.8.50",
     "@cloudflare/workers-types": "^4.20230419.0",
-    "@typescript-eslint/eslint-plugin": "^8.19.1",
+    "@typescript-eslint/eslint-plugin": "^8.36.0",
     "@typescript-eslint/parser": "^8.19.1",
-    "eslint": "^9.17.0",
-    "tus-js-client": "^4.1.0",
-    "typescript": "^5.0.4",
+    "eslint": "^9.30.1",
+    "tus-js-client": "^4.3.1",
+    "typescript": "^5.8.3",
     "vitest": "2.1.8",
     "vitest-environment-miniflare": "^2.14.0",
     "wrangler": "^3.1.2"
