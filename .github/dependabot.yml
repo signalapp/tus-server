@@ -10,7 +10,7 @@ updates:
         update-types: [ minor, patch ]
 
   - package-ecosystem: npm
-    directory: /workers
+    directory: /
     schedule:
       interval: monthly
     groups:
