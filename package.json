@@ -3,8 +3,8 @@
   "version": "0.8.1",
   "type": "module",
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.8.50",
-    "@cloudflare/workers-types": "^4.20230419.0",
+    "@cloudflare/vitest-pool-workers": "^0.8.53",
+    "@cloudflare/workers-types": "^4.20250711.0",
     "@typescript-eslint/eslint-plugin": "^8.36.0",
     "@typescript-eslint/parser": "^8.19.1",
     "eslint": "^9.30.1",
