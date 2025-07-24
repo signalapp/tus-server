@@ -547,7 +547,7 @@ export class UploadHandler {
     }
 
     // Cleanup the state for this durable object. If r2Key is provided, the method will make
-    // a best-effort attempt to clean any temporary R2 objects that may exist.
+    // a best-effort attempt to clean any partial R2 objects that may exist.
     //
     // Cleanup should be called when:
     // 1. The upload is successfully completed
@@ -556,10 +556,11 @@ export class UploadHandler {
     // 3. The client has made a mistake uploading that cannot be fixed by retrying with different arguments. e.g.,
     //    an upload with an incorrect checksum.
     async cleanup(r2Key?: string): Promise<void> {
-        // try our best to clean up R2 state we may have left around, but
-        // if we fail these objects/transactions will eventually expire
+        // Try our best to clean up R2 state we may have left around, but if
+        // we fail these objects/transactions will eventually expire. We don't
+        // bother removing temporaries because the majority of uploads should
+        // not need them and they will expire automatically.
         try {
-            await this.retryBucket.delete(this.tempkey());
             if (r2Key != null) {
                 await this.hydrateParts(
                     r2Key,

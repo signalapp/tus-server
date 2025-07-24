@@ -108,8 +108,10 @@ describe('uploadHandler', () => {
         expect(obj).toBeTruthy();
         expect(await obj?.text()).toBe('123456789!');
 
-        // temporary should be gone
-        expect(await r2.get(tempkey)).toBeNull();
+        // temporary should be left behind for expiration
+        const temp = await r2.get(tempkey);
+        expect(temp).toBeTruthy();
+        expect(await temp!.text()).toBe('12345');
 
         // all keys should be gone after success
         await expectStateEmpty(stub);
@@ -151,9 +153,11 @@ describe('uploadHandler', () => {
         expect(read?.length).toBe(partBody.byteLength + 10);
         expect(read?.slice(partBody.length, partBody.length + 10)).toBe('123456789!');
 
-        // temporary should be gone
-        expect(await r2.get(tempkey)).toBeNull();
-        // all keys should be gone after success
+        // temporary should be left behind for expiration
+        const temp = await r2.get(tempkey);
+        expect(temp).toBeTruthy();
+        expect(await temp!.text()).toBe('12345');
+
         await expectStateEmpty(stub);
     });
 
