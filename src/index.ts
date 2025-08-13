@@ -204,7 +204,10 @@ async function checkCache(request: IRequest): Promise<{
     }
     return {
         cacheKey: cacheKey,
-        cachedResponse: await caches.default.match(cacheKey)
+        cachedResponse: await caches.default.match(cacheKey, {
+            // Lets us return HEAD responses from cached GET responses.
+            ignoreMethod: true
+        })
     };
 }
 

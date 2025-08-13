@@ -249,19 +249,21 @@ describe('Tus', () => {
         expect(upload.headers.get('Upload-Offset')).toBe('4');
     });
 
-    it('returns from cache when enabled', async () => {
+    test.each(['GET', 'HEAD'])('returns from cache on %s when enabled', async (method: string) => {
         await caches.default.put(
             new Request(`http://localhost/${attachmentsPath}/${name}`),
             new Response('foo', {headers: {'cache-control': 'public, max-age=60'}}));
 
         const response = await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
+            method: method,
             headers: {'Authorization': await headerFor(name)}
         });
         expect(response.status).toBe(200);
-        expect(await response.text()).toEqual('foo');
+        const expectedBody = method == 'GET' ? 'foo' : '';
+        expect(await response.text()).toEqual(expectedBody);
     });
 
-    it('ignores cache when disabled', async () => {
+    test.each(['GET', 'HEAD'])('ignores cache on %s when disabled', async (method: string) => {
         const prefix = 'some_prefix';
         const name = `${prefix}/some_object`;
 
@@ -277,16 +279,18 @@ describe('Tus', () => {
             body: body(3, {pattern: 'foo'}),
         });
         const expectedEtag = await s3Etag(body(3, {pattern: 'foo'}));
+        const expectedBody = method == 'GET' ? 'foo' : '';
 
         const request = new Request(`http://localhost/${backupsPath}/${name}`);
         await caches.default.put(request, new Response('bar', {headers: {'cache-control': 'public, max-age=60'}}));
         const response = await SELF.fetch(`http://localhost/${backupsPath}/${name}`, {
+            method: method,
             headers: {'Authorization': await backupHeaderFor(prefix, 'read')}
         });
 
         expect(response.status).toBe(200);
         expect(response.headers.get('etag')).toEqual(expectedEtag);
-        expect(await response.text()).toBe('foo');
+        expect(await response.text()).toBe(expectedBody);
     });
 
     it('can defer length', async () => {
