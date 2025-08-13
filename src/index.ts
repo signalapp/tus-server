@@ -133,11 +133,9 @@ async function getHandler(request: IRequest, _env: Env, ctx: ExecutionContext): 
         return error(404);
     }
 
-    const cache = caches.default;
-    const cacheKey = new Request(new URL(request.url.toString()), request);
-    let response = await cache.match(cacheKey);
-    if (response != null) {
-        return response;
+    const {cacheKey, cachedResponse} = await checkCache(request);
+    if (cachedResponse) {
+        return cachedResponse;
     }
 
     let object;
@@ -158,7 +156,7 @@ async function getHandler(request: IRequest, _env: Env, ctx: ExecutionContext): 
     const headers = objectHeaders(object);
     if (object.range != null && request.headers.has('range')) {
         headers.set('content-range', rangeHeader(object.size, object.range));
-        response = new Response(object.body, {headers, status: 206});
+        const response = new Response(object.body, {headers, status: 206});
         // We do not cache partial content responses (cloudflare does not allow it)
         // However, if we've previously cached the entire object and a ranged read
         // request comes in for the object, cloudflare will satisfy the partial
@@ -166,8 +164,10 @@ async function getHandler(request: IRequest, _env: Env, ctx: ExecutionContext): 
         // See https://developers.cloudflare.com/workers/runtime-apis/cache
         return response;
     } else {
-        response = new Response(object.body, {headers});
-        ctx.waitUntil(cache.put(cacheKey, response.clone()));
+        const response = new Response(object.body, {headers});
+        if (cacheKey) {
+            ctx.waitUntil(caches.default.put(cacheKey, response.clone()));
+        }
         return response;
     }
 }
@@ -180,11 +180,9 @@ async function headHandler(request: IRequest, _env: Env, _ctx: ExecutionContext)
         return error(404);
     }
 
-    const cache = caches.default;
-    const cacheKey = new Request(new URL(request.url.toString()), request);
-    const response = await cache.match(cacheKey);
-    if (response != null) {
-        return response;
+    const {cachedResponse} = await checkCache(request);
+    if (cachedResponse) {
+        return cachedResponse;
     }
 
     const head = await new RetryBucket(bucket, DEFAULT_RETRY_PARAMS).head(requestId);
@@ -194,6 +192,20 @@ async function headHandler(request: IRequest, _env: Env, _ctx: ExecutionContext)
     const headers = objectHeaders(head);
     headers.set('Content-Length', head.size.toString());
     return new Response(null, {status: 200, headers: headers});
+}
+
+async function checkCache(request: IRequest): Promise<{
+    cacheKey: Request | undefined;
+    cachedResponse: Response | undefined
+}> {
+    const cacheKey = request.namespace.useCache && new Request(new URL(request.url.toString()), request);
+    if (!cacheKey) {
+        return {cacheKey, cachedResponse: undefined};
+    }
+    return {
+        cacheKey: cacheKey,
+        cachedResponse: await caches.default.match(cacheKey)
+    };
 }
 
 function objectHeaders(object: R2Object): Headers {
@@ -279,6 +291,7 @@ interface Namespace {
     doNamespace: DurableObjectNamespace,
     bucket: R2Bucket
     name: 'attachments' | 'backups'
+    useCache: boolean
 }
 
 // Returns the durable object namespace and R2 bucket to use for operations against the provided path prefix
@@ -288,13 +301,15 @@ function selectNamespace(env: Env, prefix: string): Namespace | undefined {
             return {
                 doNamespace: env.ATTACHMENT_UPLOAD_HANDLER,
                 bucket: env.ATTACHMENT_BUCKET,
-                name: ATTACHMENT_PREFIX
+                name: ATTACHMENT_PREFIX,
+                useCache: true
             };
         case BACKUP_PREFIX:
             return {
                 doNamespace: env.BACKUP_UPLOAD_HANDLER,
                 bucket: env.BACKUP_BUCKET,
-                name: BACKUP_PREFIX
+                name: BACKUP_PREFIX,
+                useCache: false
             };
         default:
             return undefined;

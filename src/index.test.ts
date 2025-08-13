@@ -249,6 +249,46 @@ describe('Tus', () => {
         expect(upload.headers.get('Upload-Offset')).toBe('4');
     });
 
+    it('returns from cache when enabled', async () => {
+        await caches.default.put(
+            new Request(`http://localhost/${attachmentsPath}/${name}`),
+            new Response('foo', {headers: {'cache-control': 'public, max-age=60'}}));
+
+        const response = await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
+            headers: {'Authorization': await headerFor(name)}
+        });
+        expect(response.status).toBe(200);
+        expect(await response.text()).toEqual('foo');
+    });
+
+    it('ignores cache when disabled', async () => {
+        const prefix = 'some_prefix';
+        const name = `${prefix}/some_object`;
+
+        await SELF.fetch(`http://localhost/upload/${backupsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Authorization': await backupHeaderFor(name, 'write'),
+                'Tus-Resumable': '1.0.0',
+                'Upload-Metadata': `filename ${btoa(name)}`,
+                'Upload-Length': '3',
+                'Content-Type': 'application/offset+octet-stream'
+            },
+            body: body(3, {pattern: 'foo'}),
+        });
+        const expectedEtag = await s3Etag(body(3, {pattern: 'foo'}));
+
+        const request = new Request(`http://localhost/${backupsPath}/${name}`);
+        await caches.default.put(request, new Response('bar', {headers: {'cache-control': 'public, max-age=60'}}));
+        const response = await SELF.fetch(`http://localhost/${backupsPath}/${name}`, {
+            headers: {'Authorization': await backupHeaderFor(prefix, 'read')}
+        });
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('etag')).toEqual(expectedEtag);
+        expect(await response.text()).toBe('foo');
+    });
+
     it('can defer length', async () => {
         const create = await createRequest();
 
