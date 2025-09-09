@@ -278,7 +278,11 @@ async function uploadHandler(request: IRequest, _env: Env): Promise<Response> {
             headers: request.headers,
             signal: AbortSignal.timeout(DO_CALL_TIMEOUT)
         });
-    }, {params: DEFAULT_RETRY_PARAMS, shouldRetry: isRetryableDurableObjectError});
+    }, {
+        params: DEFAULT_RETRY_PARAMS,
+        // Only retry requests without bodies. If the request has a body, the stream is consumed by the first request
+        shouldRetry: (err) => request.body == null && isRetryableDurableObjectError(err)
+    });
 }
 
 // Check if the error has the retryable flag set. This generally indicates a transient cloudflare system error
