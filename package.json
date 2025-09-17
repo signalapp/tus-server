@@ -3,15 +3,15 @@
   "version": "0.10.0",
   "type": "module",
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.8.64",
-    "@cloudflare/workers-types": "^4.20230419.0",
-    "@typescript-eslint/eslint-plugin": "^8.39.1",
-    "@typescript-eslint/parser": "^8.19.1",
-    "eslint": "^9.33.0",
+    "@cloudflare/vitest-pool-workers": "^0.8.71",
+    "@cloudflare/workers-types": "^4.20250917.0",
+    "@typescript-eslint/eslint-plugin": "^8.44.0",
+    "@typescript-eslint/parser": "^8.44.0",
+    "eslint": "^9.35.0",
     "tus-js-client": "^4.3.1",
     "typescript": "^5.9.2",
     "vitest": "3.2.4",
-    "wrangler": "^4.24.0"
+    "wrangler": "^4.37.1"
   },
   "private": true,
   "scripts": {
