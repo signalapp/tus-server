@@ -6,15 +6,16 @@
 // superfluous `await response.body.cancel()` calls in some tests may be removed when this issue is fixed.
 
 import {describe, expect, it, test} from 'vitest';
-import {attachmentsPath, backupHeaderFor, backupsPath, headerFor} from './testutil';
+import {attachmentsPath, AuthType, backupHeaderFor, backupsPath, headerFor, secret} from './testutil';
 import {SELF} from 'cloudflare:test';
 import {X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
+import {SignJWT} from 'jose';
 import './env.d.ts';
 
 const PART_SIZE = 1024 * 1024 * 5;
 
-describe('worker auth', () => {
+describe('worker basic auth', () => {
     it('rejects un-authd request', async () => {
         const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
             method: 'POST',
@@ -36,7 +37,7 @@ describe('worker auth', () => {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
-                'Authorization': await headerFor('abc'),
+                'Authorization': await headerFor('abc', 'basic'),
                 'Upload-Length': '1'
             }
         });
@@ -49,7 +50,7 @@ describe('worker auth', () => {
             method: 'POST',
             headers: {
                 'Upload-Metadata': `filename ${btoa('abc')}`,
-                'Authorization': await backupHeaderFor('abc', 'read'),
+                'Authorization': await backupHeaderFor('abc', 'read', 'basic'),
                 'Upload-Length': '1'
             }
         });
@@ -73,14 +74,14 @@ describe('worker auth', () => {
 
     it.each(['write', '', 'abc'])('rejects GET to backups with %s permission', async (permission) => {
         const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`, {
-            headers: {'Authorization': await backupHeaderFor('abc', permission)}
+            headers: {'Authorization': await backupHeaderFor('abc', permission, 'basic')}
         });
         expect(res.status).toBe(401);
     });
 
     it.each(['ab', '/abc', 'abc/', '', 'abc/def'])('rejects GET with incorrect subdir %s', async (subdir) => {
         const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`, {
-            headers: {'Authorization': await backupHeaderFor(subdir, 'read')}
+            headers: {'Authorization': await backupHeaderFor(subdir, 'read', 'basic')}
         });
         expect(res.status).toBe(401);
     });
@@ -88,9 +89,85 @@ describe('worker auth', () => {
 
     it('accepts subdir authd GET to backups', async () => {
         const res = await SELF.fetch(`http://localhost/${backupsPath}/abc/def`, {
-            headers: {'Authorization': await backupHeaderFor('abc', 'read')}
+            headers: {'Authorization': await backupHeaderFor('abc', 'read', 'basic')}
         });
         expect(res.status).toBe(404);
+    });
+});
+
+describe('jwt worker auth', () => {
+    const jwtSecret = new Uint8Array(Buffer.from(secret, 'base64'));
+
+    async function signToken(overrides?: {
+        sub?: string,
+        aud?: string,
+        scope?: string,
+        secret?: Uint8Array,
+        iat?: number,
+    }): Promise<string> {
+        const claims: Record<string, unknown> = {};
+        if (overrides?.scope !== undefined) {
+            claims.scope = overrides.scope;
+        }
+        let builder = new SignJWT(claims)
+            .setProtectedHeader({alg: 'HS256'})
+            .setIssuedAt(overrides?.iat);
+        if (overrides?.sub !== undefined) {
+            builder = builder.setSubject(overrides.sub);
+        }
+        if (overrides?.aud !== undefined) {
+            builder = builder.setAudience(overrides.aud);
+        }
+        return builder.sign(overrides?.secret ?? jwtSecret);
+    }
+
+    it('accepts valid bearer token', async () => {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await headerFor('abc', 'bearer'),
+                'Upload-Length': '1'
+            }
+        });
+        expect(res.status).toBe(201);
+    });
+
+
+    const eightDaysAgo = Math.floor(Date.now() / 1000) - 8 * 24 * 3600;
+    const wrongSecret = new Uint8Array(Buffer.from('aaaaaa', 'base64'));
+
+    it.each([
+        ['wrong secret', {sub: 'abc', aud: attachmentsPath, secret: wrongSecret}],
+        ['wrong audience', {sub: 'abc', aud: 'wrong'}],
+        ['missing sub', {aud: attachmentsPath}],
+        ['missing aud', {sub: 'abc'}],
+        ['expired token', {sub: 'abc', aud: attachmentsPath, iat: eightDaysAgo}],
+        ['invalid permission', {sub: 'abc', aud: attachmentsPath, scope: 'admin'}],
+        ['subject mismatch', {sub: 'wrong', aud: attachmentsPath}],
+    ])('rejects %s', async (_label, overrides) => {
+        const token = await signToken(overrides);
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': `Bearer ${token}`,
+                'Upload-Length': '1'
+            }
+        });
+        expect(res.status).toBe(401);
+    });
+
+    it('rejects malformed token', async () => {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': 'Bearer not.a.jwt',
+                'Upload-Length': '1'
+            }
+        });
+        expect(res.status).toBe(401);
     });
 });
 
@@ -168,416 +245,418 @@ describe('request validation', () => {
 });
 
 
-describe('Tus', () => {
-    const name = 'test123';
+for (const authType of ['basic', 'bearer'] as AuthType[]) {
+    describe(`Tus (${authType})`, () => {
+        const name = 'test123';
 
-    interface CreateOptions {
-        uploadLength?: number;
-        body?: string;
-        checksum?: Uint8Array;
-    }
-
-    async function createRequest(opts?: CreateOptions) {
-        const headers: Record<string, string> = {
-            'Authorization': await headerFor(name),
-            'Tus-Resumable': '1.0.0',
-            'Upload-Metadata': `filename ${btoa(name)}`
-        };
-        if (opts?.uploadLength != null) {
-            headers['Upload-Length'] = opts.uploadLength.toString();
-        } else {
-            headers['Upload-Defer-Length'] = '1';
+        interface CreateOptions {
+            uploadLength?: number;
+            body?: string;
+            checksum?: Uint8Array;
         }
-        if (opts?.checksum != null) {
-            headers[X_SIGNAL_CHECKSUM_SHA256] = toBase64(opts?.checksum);
-        }
-        if (opts?.body != null) {
-            headers['Content-Type'] = 'application/offset+octet-stream';
-        }
-        return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
-            method: 'POST',
-            headers: headers,
-            body: opts?.body
-        });
-    }
 
-    async function patchRequest(uploadOffset: number, body?: string | ReadableStream<Uint8Array>, headers?: Record<string, string>) {
-        const h = headers || {};
-        Object.assign(h, {
-            'Authorization': await headerFor(name),
-            'Upload-Offset': uploadOffset.toString(),
-            'Content-Type': 'application/offset+octet-stream',
-            'Tus-Resumable': '1.0.0'
-        });
-
-        return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
-            method: 'PATCH',
-            headers: h,
-            body: body
-        });
-    }
-
-    async function headRequest() {
-        return SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
-            method: 'HEAD',
-            headers: {
-                'Authorization': await headerFor(name),
-                'Tus-Resumable': '1.0.0'
-            }
-        });
-    }
-
-    async function getRequest(headers?: Record<string, string>) {
-        const h = headers || {};
-        Object.assign(h, {
-            'Authorization': await headerFor(name),
-        });
-        return await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
-            method: 'GET',
-            headers: h
-        });
-    }
-
-    it('accepts an upload', async () => {
-        const create = await createRequest({uploadLength: 4});
-        expect(await create.text()).toBe('');
-        expect(create.status).toBe(201);
-
-        const upload = await patchRequest(0, 'test');
-        expect(await upload.text()).toBe('');
-        expect(upload.status).toBe(204);
-        expect(upload.headers.get('Upload-Offset')).toBe('4');
-    });
-
-    test.each(['GET', 'HEAD'])('returns from cache on %s when enabled', async (method: string) => {
-        await caches.default.put(
-            new Request(`http://localhost/${attachmentsPath}/${name}`),
-            new Response('foo', {headers: {'cache-control': 'public, max-age=60'}}));
-
-        const response = await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
-            method: method,
-            headers: {'Authorization': await headerFor(name)}
-        });
-        expect(response.status).toBe(200);
-        const expectedBody = method == 'GET' ? 'foo' : '';
-        expect(await response.text()).toEqual(expectedBody);
-    });
-
-    test.each(['GET', 'HEAD'])('ignores cache on %s when disabled', async (method: string) => {
-        const prefix = 'some_prefix';
-        const name = `${prefix}/some_object`;
-
-        await SELF.fetch(`http://localhost/upload/${backupsPath}/`, {
-            method: 'POST',
-            headers: {
-                'Authorization': await backupHeaderFor(name, 'write'),
+        async function createRequest(opts?: CreateOptions) {
+            const headers: Record<string, string> = {
+                'Authorization': await headerFor(name, authType),
                 'Tus-Resumable': '1.0.0',
-                'Upload-Metadata': `filename ${btoa(name)}`,
-                'Upload-Length': '3',
-                'Content-Type': 'application/offset+octet-stream'
-            },
-            body: body(3, {pattern: 'foo'}),
-        });
-        const expectedEtag = await s3Etag(body(3, {pattern: 'foo'}));
-        const expectedBody = method == 'GET' ? 'foo' : '';
-
-        const request = new Request(`http://localhost/${backupsPath}/${name}`);
-        await caches.default.put(request, new Response('bar', {headers: {'cache-control': 'public, max-age=60'}}));
-        const response = await SELF.fetch(`http://localhost/${backupsPath}/${name}`, {
-            method: method,
-            headers: {'Authorization': await backupHeaderFor(prefix, 'read')}
-        });
-
-        expect(response.status).toBe(200);
-        expect(response.headers.get('etag')).toEqual(expectedEtag);
-        expect(await response.text()).toBe(expectedBody);
-    });
-
-    it('can defer length', async () => {
-        const create = await createRequest();
-
-        expect(await create.text()).toBe('');
-        expect(create.status).toBe(201);
-
-        const upload1 = await patchRequest(0, 'test');
-        expect(upload1.status).toBe(204);
-        const upload2 = await patchRequest(4, 'test');
-        expect(upload2.status).toBe(204);
-        const upload3 = await patchRequest(8, 'test', {'Upload-Length': '12'});
-        expect(upload3.status).toBe(204);
-
-        const get = await getRequest();
-        expect(await get.text()).toBe('testtesttest');
-        expect(get.status).toBe(200);
-    });
-
-    it('can defer length and finish with an empty body', async () => {
-        const create = await createRequest();
-
-        expect(await create.text()).toBe('');
-        expect(create.status).toBe(201);
-
-        const upload1 = await patchRequest(0, 'test');
-        expect(upload1.status).toBe(204);
-        expect(upload1.headers.get('Upload-Offset')).toBe('4');
-
-        const upload2 = await patchRequest(4, '', {'Upload-Length': '4'});
-        expect(upload2.status).toBe(204);
-        expect(upload2.headers.get('Upload-Offset')).toBe('4');
-
-        const get = await getRequest();
-        expect(await get.text()).toBe('test');
-        expect(get.status).toBe(200);
-    });
-
-    it('can upload in chunks', async () => {
-        const create = await createRequest({uploadLength: 8});
-        expect(create.status).toBe(201);
-
-        let upload = await patchRequest(0, 'test');
-        expect(upload.status).toBe(204);
-        expect(upload.headers.get('Upload-Offset')).toBe('4');
-
-        const head = await headRequest();
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('4');
-
-        upload = await patchRequest(4, 'test');
-        expect(upload.statusText).toBe('No Content');
-        expect(upload.status).toBe(204);
-
-        const get = await getRequest();
-        expect(await get.text()).toBe('testtest');
-        expect(get.status).toBe(200);
-    });
-
-    it('can resume after interruption', async () => {
-        const create = await createRequest({uploadLength: 16});
-        expect(create.status).toBe(201);
-
-        // body errors after first 8 bytes
-        await patchRequest(0, body(8, {
-            pattern: 'test',
-            error: 'injected error',
-            // write small chunks so the reader reads something before the error
-            targetChunkSize: 4
-        }));
-
-        const head = await headRequest();
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('8');
-
-        // upload the rest
-        const upload = await patchRequest(8, 'testtest');
-        expect(upload.status).toBe(204);
-
-        const get = await getRequest();
-        expect(await get.text()).toBe('testtesttesttest');
-    });
-
-    it('can do a partial upload during creation', async () => {
-        const create = await createRequest({uploadLength: 6, body: 'foo'});
-        expect(create.status).toBe(201);
-        expect(create.headers.get('Upload-Offset')).toBe('3');
-        expect((await headRequest()).headers.get('Upload-Offset')).toBe('3');
-
-        const upload = await patchRequest(3, 'bar');
-        expect(upload.status).toBe(204);
-
-        const get = await getRequest();
-        expect(await get.text()).toBe('foobar');
-    });
-
-    it('rejects bad upload-offset', async () => {
-        const create = await createRequest({uploadLength: 6, body: 'foo'});
-        expect(create.status).toBe(201);
-        expect(create.headers.get('Upload-Offset')).toBe('3');
-
-        // Sending a request to the test workerd with an unconsumed body sometimes flakes. The
-        // validation we're testing for happens before the body is used anyway, so just leave
-        // it off until this issue is fixed.
-        // https://github.com/cloudflare/workers-sdk/issues/3607
-        // const upload = await patchRequest(4, 'ba');
-        const upload = await patchRequest(4);
-        expect(upload.status).toBe(409);
-        await upload.body?.cancel();
-
-        await patchRequest(3, 'bar');
-        expect(await (await getRequest()).text()).toBe('foobar');
-    });
-
-    it('returns 200 for head of completed uploads', async () => {
-        await createRequest({uploadLength: 4});
-        await patchRequest(0, 'test');
-
-        // https://tus.io/protocols/resumable-upload#head
-        // The Server MUST always include the Upload-Offset header in the response for a HEAD request, even if the
-        // offset is 0, or the upload is already considered completed.
-        const head = await headRequest();
-        expect(await head.text()).toBe('');
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('4');
-        expect(head.headers.get('Upload-Length')).toBe('4');
-    });
-
-    it('returns upload-length on head if it is known', async () => {
-        await createRequest({uploadLength: 4});
-        await patchRequest(0, 'te');
-
-        let head = await headRequest();
-        expect(await head.text()).toBe('');
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('2');
-        expect(head.headers.get('Upload-Length')).toBe('4');
-
-        await patchRequest(2, 'st');
-
-        head = await headRequest();
-        expect(await head.text()).toBe('');
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('4');
-        expect(head.headers.get('Upload-Length')).toBe('4');
-    });
-
-    it('handles head with missing upload length', async () => {
-        await createRequest();
-        await patchRequest(0, 'te');
-
-        let head = await headRequest();
-        expect(await head.text()).toBe('');
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('2');
-        expect(head.headers.get('Upload-Length')).toBeNull();
-
-        await patchRequest(2, 'st', {'Upload-Length': '4'});
-
-        head = await headRequest();
-        expect(await head.text()).toBe('');
-        expect(head.status).toBe(200);
-        expect(head.headers.get('Upload-Offset')).toBe('4');
-        expect(head.headers.get('Upload-Length')).toBe('4');
-    });
-
-    it('handles ranged reads', async () => {
-        const bytes = new Uint8Array(1000);
-        crypto.getRandomValues(bytes);
-        const body = Buffer.from(bytes).toString('base64');
-        await createRequest({body: body, uploadLength: body.length});
-
-        const prefixResponse = await getRequest({'range': 'bytes=0-371'});
-        const prefix = await prefixResponse.text();
-        expect(prefixResponse.status).toBe(206);
-        expect(prefixResponse.headers.get('content-range')).toBe(`bytes 0-371/${body.length}`);
-        expect(prefix).toEqual(body.slice(0, 372));
-
-        const suffixResponse = await getRequest({'range': 'bytes=372-'});
-        const suffix = await suffixResponse.text();
-        expect(suffixResponse.status).toBe(206);
-        expect(suffixResponse.headers.get('content-range')).toBe(`bytes 372-${body.length - 1}/${body.length}`);
-        expect(suffix).toEqual(body.slice(372));
-    });
-
-    test.each(['nibbles=0-3', 'bytes=0-2,4-', 'bytes=zzz'])('ignores bad range: %s', async (arg: string) => {
-        await createRequest({body: 'hello', uploadLength: 5});
-        const response = await getRequest({'range': arg});
-        expect(response.status).toBe(206);
-        expect(await response.text()).toBe('hello');
-    });
-
-    it('handles suffix ranges', async () => {
-        const bytes = new Uint8Array(1000);
-        crypto.getRandomValues(bytes);
-        const body = Buffer.from(bytes).toString('base64');
-        await createRequest({body: body, uploadLength: body.length});
-        const response = await getRequest({'range': 'bytes=-99'});
-        expect(response.status).toBe(206);
-        const responseText = await response.text();
-        expect(responseText).toEqual(body.slice(body.length - 99, body.length));
-        expect(response.headers.get('content-range')).toEqual(`bytes ${body.length - 99}-${body.length - 1}/${body.length}`);
-    });
-
-    test.each([1, 2, 17])('handles reading chunks of length=%s', {timeout: 60000}, async (chunkSize: number) => {
-        const bytes = new Uint8Array(100);
-        crypto.getRandomValues(bytes);
-        const body = Buffer.from(bytes).toString('base64');
-        await createRequest({body: body, uploadLength: body.length});
-
-        let actual = '';
-        for (let offset = 0; offset < body.length; offset += chunkSize) {
-            const endIndex = Math.min(offset + chunkSize - 1, body.length - 1);
-            const response = await getRequest({'range': `bytes=${offset}-${endIndex}`});
-            expect(response.status).toBe(206);
-            expect(response.headers.get('content-range')).toBe(`bytes ${offset}-${endIndex}/${body.length}`);
-            actual += await response.text();
-        }
-        expect(actual).toEqual(body);
-    });
-
-    test.each(
-        [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1]
-    )('rejects incorrect checksum for length=%s', async (bodySize: number) => {
-        await createRequest({uploadLength: bodySize, checksum: new Uint8Array(32)});
-        const upload = await patchRequest(0, body(bodySize, {pattern: 'test'}));
-        expect(upload.status).toBe(415);
-        await upload.body?.cancel();
-
-        // should delete the in-progress upload: if the object already existed, Upload-Offset should be the object
-        // length. Otherwise, the head should 404.
-        const head = await headRequest();
-        if (head.status === 200) {
-            expect(head.headers.get('Upload-Offset'))
-                .toBe(head.headers.get('Upload-Length'));
-        } else {
-            expect(head.status).toBe(404);
-        }
-    });
-
-    test.each(
-        [
-            [100, false],
-            [100, true],
-            [PART_SIZE + 1, false],
-            [PART_SIZE + 1, true]
-        ]
-    )('accepts correct checksum for length=%s, multiple-patches=%s)',
-        async (bodySize: number, multiplePatches: boolean) => {
-            const expectedChecksum = await sha256(body(bodySize, {pattern: 'test'}));
-            await createRequest({uploadLength: bodySize, checksum: new Uint8Array(expectedChecksum)});
-            if (multiplePatches) {
-                await patchRequest(0, body(4, {pattern: 'test'}));
-                await patchRequest(4, body(bodySize - 4, {pattern: 'test'}));
-
+                'Upload-Metadata': `filename ${btoa(name)}`
+            };
+            if (opts?.uploadLength != null) {
+                headers['Upload-Length'] = opts.uploadLength.toString();
             } else {
-                await patchRequest(0, body(bodySize, {pattern: 'test'}));
+                headers['Upload-Defer-Length'] = '1';
             }
-            // make sure the checksum is also returned on GET
-            const get = await getRequest();
-            await get.body?.cancel();
-            const actualChecksum = Buffer.from(get.headers.get(X_SIGNAL_CHECKSUM_SHA256) || '', 'base64');
-            expect(actualChecksum.buffer).toEqual(expectedChecksum);
-        });
+            if (opts?.checksum != null) {
+                headers[X_SIGNAL_CHECKSUM_SHA256] = toBase64(opts?.checksum);
+            }
+            if (opts?.body != null) {
+                headers['Content-Type'] = 'application/offset+octet-stream';
+            }
+            return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+                method: 'POST',
+                headers: headers,
+                body: opts?.body
+            });
+        }
 
-    // parameterized test of boundary conditions
-    test.each(
-        [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1, PART_SIZE * 10 + 1]
-    )('upload(%s bytes)', {timeout: 60000},
-        async (uploadSize) => {
-            const create = await createRequest({uploadLength: uploadSize});
+        async function patchRequest(uploadOffset: number, body?: string | ReadableStream<Uint8Array>, headers?: Record<string, string>) {
+            const h = headers || {};
+            Object.assign(h, {
+                'Authorization': await headerFor(name, authType),
+                'Upload-Offset': uploadOffset.toString(),
+                'Content-Type': 'application/offset+octet-stream',
+                'Tus-Resumable': '1.0.0'
+            });
+
+            return await SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
+                method: 'PATCH',
+                headers: h,
+                body: body
+            });
+        }
+
+        async function headRequest() {
+            return SELF.fetch(`http://localhost/upload/${attachmentsPath}/${name}`, {
+                method: 'HEAD',
+                headers: {
+                    'Authorization': await headerFor(name, authType),
+                    'Tus-Resumable': '1.0.0'
+                }
+            });
+        }
+
+        async function getRequest(headers?: Record<string, string>) {
+            const h = headers || {};
+            Object.assign(h, {
+                'Authorization': await headerFor(name, authType),
+            });
+            return await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
+                method: 'GET',
+                headers: h
+            });
+        }
+
+        it('accepts an upload', async () => {
+            const create = await createRequest({uploadLength: 4});
+            expect(await create.text()).toBe('');
             expect(create.status).toBe(201);
 
-            const upload = await patchRequest(0, body(uploadSize, {pattern: 'test'}));
+            const upload = await patchRequest(0, 'test');
+            expect(await upload.text()).toBe('');
             expect(upload.status).toBe(204);
-            expect(upload.headers.get('Upload-Offset')).toBe(uploadSize.toString());
-
-            const get = await getRequest();
-            const read = await get.text();
-            expect(bodyMatchesPattern(read, 'test')).toBe(true);
-
-            const expectedEtag = await s3Etag(body(uploadSize, {pattern: 'test'}));
-            expect(get.headers.get('etag')).toBe(expectedEtag);
+            expect(upload.headers.get('Upload-Offset')).toBe('4');
         });
 
-});
+        test.each(['GET', 'HEAD'])('returns from cache on %s when enabled', async (method: string) => {
+            await caches.default.put(
+                new Request(`http://localhost/${attachmentsPath}/${name}`),
+                new Response('foo', {headers: {'cache-control': 'public, max-age=60'}}));
+
+            const response = await SELF.fetch(`http://localhost/${attachmentsPath}/${name}`, {
+                method: method,
+                headers: {'Authorization': await headerFor(name)}
+            });
+            expect(response.status).toBe(200);
+            const expectedBody = method == 'GET' ? 'foo' : '';
+            expect(await response.text()).toEqual(expectedBody);
+        });
+
+        test.each(['GET', 'HEAD'])('ignores cache on %s when disabled', async (method: string) => {
+            const prefix = 'some_prefix';
+            const name = `${prefix}/some_object`;
+
+            await SELF.fetch(`http://localhost/upload/${backupsPath}/`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': await backupHeaderFor(name, 'write', authType),
+                    'Tus-Resumable': '1.0.0',
+                    'Upload-Metadata': `filename ${btoa(name)}`,
+                    'Upload-Length': '3',
+                    'Content-Type': 'application/offset+octet-stream'
+                },
+                body: body(3, {pattern: 'foo'}),
+            });
+            const expectedEtag = await s3Etag(body(3, {pattern: 'foo'}));
+            const expectedBody = method == 'GET' ? 'foo' : '';
+
+            const request = new Request(`http://localhost/${backupsPath}/${name}`);
+            await caches.default.put(request, new Response('bar', {headers: {'cache-control': 'public, max-age=60'}}));
+            const response = await SELF.fetch(`http://localhost/${backupsPath}/${name}`, {
+                method: method,
+                headers: {'Authorization': await backupHeaderFor(prefix, 'read', authType)}
+            });
+
+            expect(response.status).toBe(200);
+            expect(response.headers.get('etag')).toEqual(expectedEtag);
+            expect(await response.text()).toBe(expectedBody);
+        });
+
+        it('can defer length', async () => {
+            const create = await createRequest();
+
+            expect(await create.text()).toBe('');
+            expect(create.status).toBe(201);
+
+            const upload1 = await patchRequest(0, 'test');
+            expect(upload1.status).toBe(204);
+            const upload2 = await patchRequest(4, 'test');
+            expect(upload2.status).toBe(204);
+            const upload3 = await patchRequest(8, 'test', {'Upload-Length': '12'});
+            expect(upload3.status).toBe(204);
+
+            const get = await getRequest();
+            expect(await get.text()).toBe('testtesttest');
+            expect(get.status).toBe(200);
+        });
+
+        it('can defer length and finish with an empty body', async () => {
+            const create = await createRequest();
+
+            expect(await create.text()).toBe('');
+            expect(create.status).toBe(201);
+
+            const upload1 = await patchRequest(0, 'test');
+            expect(upload1.status).toBe(204);
+            expect(upload1.headers.get('Upload-Offset')).toBe('4');
+
+            const upload2 = await patchRequest(4, '', {'Upload-Length': '4'});
+            expect(upload2.status).toBe(204);
+            expect(upload2.headers.get('Upload-Offset')).toBe('4');
+
+            const get = await getRequest();
+            expect(await get.text()).toBe('test');
+            expect(get.status).toBe(200);
+        });
+
+        it('can upload in chunks', async () => {
+            const create = await createRequest({uploadLength: 8});
+            expect(create.status).toBe(201);
+
+            let upload = await patchRequest(0, 'test');
+            expect(upload.status).toBe(204);
+            expect(upload.headers.get('Upload-Offset')).toBe('4');
+
+            const head = await headRequest();
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('4');
+
+            upload = await patchRequest(4, 'test');
+            expect(upload.statusText).toBe('No Content');
+            expect(upload.status).toBe(204);
+
+            const get = await getRequest();
+            expect(await get.text()).toBe('testtest');
+            expect(get.status).toBe(200);
+        });
+
+        it('can resume after interruption', async () => {
+            const create = await createRequest({uploadLength: 16});
+            expect(create.status).toBe(201);
+
+            // body errors after first 8 bytes
+            await patchRequest(0, body(8, {
+                pattern: 'test',
+                error: 'injected error',
+                // write small chunks so the reader reads something before the error
+                targetChunkSize: 4
+            }));
+
+            const head = await headRequest();
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('8');
+
+            // upload the rest
+            const upload = await patchRequest(8, 'testtest');
+            expect(upload.status).toBe(204);
+
+            const get = await getRequest();
+            expect(await get.text()).toBe('testtesttesttest');
+        });
+
+        it('can do a partial upload during creation', async () => {
+            const create = await createRequest({uploadLength: 6, body: 'foo'});
+            expect(create.status).toBe(201);
+            expect(create.headers.get('Upload-Offset')).toBe('3');
+            expect((await headRequest()).headers.get('Upload-Offset')).toBe('3');
+
+            const upload = await patchRequest(3, 'bar');
+            expect(upload.status).toBe(204);
+
+            const get = await getRequest();
+            expect(await get.text()).toBe('foobar');
+        });
+
+        it('rejects bad upload-offset', async () => {
+            const create = await createRequest({uploadLength: 6, body: 'foo'});
+            expect(create.status).toBe(201);
+            expect(create.headers.get('Upload-Offset')).toBe('3');
+
+            // Sending a request to the test workerd with an unconsumed body sometimes flakes. The
+            // validation we're testing for happens before the body is used anyway, so just leave
+            // it off until this issue is fixed.
+            // https://github.com/cloudflare/workers-sdk/issues/3607
+            // const upload = await patchRequest(4, 'ba');
+            const upload = await patchRequest(4);
+            expect(upload.status).toBe(409);
+            await upload.body?.cancel();
+
+            await patchRequest(3, 'bar');
+            expect(await (await getRequest()).text()).toBe('foobar');
+        });
+
+        it('returns 200 for head of completed uploads', async () => {
+            await createRequest({uploadLength: 4});
+            await patchRequest(0, 'test');
+
+            // https://tus.io/protocols/resumable-upload#head
+            // The Server MUST always include the Upload-Offset header in the response for a HEAD request, even if the
+            // offset is 0, or the upload is already considered completed.
+            const head = await headRequest();
+            expect(await head.text()).toBe('');
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('4');
+            expect(head.headers.get('Upload-Length')).toBe('4');
+        });
+
+        it('returns upload-length on head if it is known', async () => {
+            await createRequest({uploadLength: 4});
+            await patchRequest(0, 'te');
+
+            let head = await headRequest();
+            expect(await head.text()).toBe('');
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('2');
+            expect(head.headers.get('Upload-Length')).toBe('4');
+
+            await patchRequest(2, 'st');
+
+            head = await headRequest();
+            expect(await head.text()).toBe('');
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('4');
+            expect(head.headers.get('Upload-Length')).toBe('4');
+        });
+
+        it('handles head with missing upload length', async () => {
+            await createRequest();
+            await patchRequest(0, 'te');
+
+            let head = await headRequest();
+            expect(await head.text()).toBe('');
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('2');
+            expect(head.headers.get('Upload-Length')).toBeNull();
+
+            await patchRequest(2, 'st', {'Upload-Length': '4'});
+
+            head = await headRequest();
+            expect(await head.text()).toBe('');
+            expect(head.status).toBe(200);
+            expect(head.headers.get('Upload-Offset')).toBe('4');
+            expect(head.headers.get('Upload-Length')).toBe('4');
+        });
+
+        it('handles ranged reads', async () => {
+            const bytes = new Uint8Array(1000);
+            crypto.getRandomValues(bytes);
+            const body = Buffer.from(bytes).toString('base64');
+            await createRequest({body: body, uploadLength: body.length});
+
+            const prefixResponse = await getRequest({'range': 'bytes=0-371'});
+            const prefix = await prefixResponse.text();
+            expect(prefixResponse.status).toBe(206);
+            expect(prefixResponse.headers.get('content-range')).toBe(`bytes 0-371/${body.length}`);
+            expect(prefix).toEqual(body.slice(0, 372));
+
+            const suffixResponse = await getRequest({'range': 'bytes=372-'});
+            const suffix = await suffixResponse.text();
+            expect(suffixResponse.status).toBe(206);
+            expect(suffixResponse.headers.get('content-range')).toBe(`bytes 372-${body.length - 1}/${body.length}`);
+            expect(suffix).toEqual(body.slice(372));
+        });
+
+        test.each(['nibbles=0-3', 'bytes=0-2,4-', 'bytes=zzz'])('ignores bad range: %s', async (arg: string) => {
+            await createRequest({body: 'hello', uploadLength: 5});
+            const response = await getRequest({'range': arg});
+            expect(response.status).toBe(206);
+            expect(await response.text()).toBe('hello');
+        });
+
+        it('handles suffix ranges', async () => {
+            const bytes = new Uint8Array(1000);
+            crypto.getRandomValues(bytes);
+            const body = Buffer.from(bytes).toString('base64');
+            await createRequest({body: body, uploadLength: body.length});
+            const response = await getRequest({'range': 'bytes=-99'});
+            expect(response.status).toBe(206);
+            const responseText = await response.text();
+            expect(responseText).toEqual(body.slice(body.length - 99, body.length));
+            expect(response.headers.get('content-range')).toEqual(`bytes ${body.length - 99}-${body.length - 1}/${body.length}`);
+        });
+
+        test.each([1, 2, 17])('handles reading chunks of length=%s', {timeout: 60000}, async (chunkSize: number) => {
+            const bytes = new Uint8Array(100);
+            crypto.getRandomValues(bytes);
+            const body = Buffer.from(bytes).toString('base64');
+            await createRequest({body: body, uploadLength: body.length});
+
+            let actual = '';
+            for (let offset = 0; offset < body.length; offset += chunkSize) {
+                const endIndex = Math.min(offset + chunkSize - 1, body.length - 1);
+                const response = await getRequest({'range': `bytes=${offset}-${endIndex}`});
+                expect(response.status).toBe(206);
+                expect(response.headers.get('content-range')).toBe(`bytes ${offset}-${endIndex}/${body.length}`);
+                actual += await response.text();
+            }
+            expect(actual).toEqual(body);
+        });
+
+        test.each(
+            [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1]
+        )('rejects incorrect checksum for length=%s', async (bodySize: number) => {
+            await createRequest({uploadLength: bodySize, checksum: new Uint8Array(32)});
+            const upload = await patchRequest(0, body(bodySize, {pattern: 'test'}));
+            expect(upload.status).toBe(415);
+            await upload.body?.cancel();
+
+            // should delete the in-progress upload: if the object already existed, Upload-Offset should be the object
+            // length. Otherwise, the head should 404.
+            const head = await headRequest();
+            if (head.status === 200) {
+                expect(head.headers.get('Upload-Offset'))
+                    .toBe(head.headers.get('Upload-Length'));
+            } else {
+                expect(head.status).toBe(404);
+            }
+        });
+
+        test.each(
+            [
+                [100, false],
+                [100, true],
+                [PART_SIZE + 1, false],
+                [PART_SIZE + 1, true]
+            ]
+        )('accepts correct checksum for length=%s, multiple-patches=%s)',
+            async (bodySize: number, multiplePatches: boolean) => {
+                const expectedChecksum = await sha256(body(bodySize, {pattern: 'test'}));
+                await createRequest({uploadLength: bodySize, checksum: new Uint8Array(expectedChecksum)});
+                if (multiplePatches) {
+                    await patchRequest(0, body(4, {pattern: 'test'}));
+                    await patchRequest(4, body(bodySize - 4, {pattern: 'test'}));
+
+                } else {
+                    await patchRequest(0, body(bodySize, {pattern: 'test'}));
+                }
+                // make sure the checksum is also returned on GET
+                const get = await getRequest();
+                await get.body?.cancel();
+                const actualChecksum = Buffer.from(get.headers.get(X_SIGNAL_CHECKSUM_SHA256) || '', 'base64');
+                expect(actualChecksum.buffer).toEqual(expectedChecksum);
+            });
+
+        // parameterized test of boundary conditions
+        test.each(
+            [0, 1, PART_SIZE - 1, PART_SIZE, PART_SIZE + 1, PART_SIZE * 10 + 1]
+        )('upload(%s bytes)', {timeout: 60000},
+            async (uploadSize) => {
+                const create = await createRequest({uploadLength: uploadSize});
+                expect(create.status).toBe(201);
+
+                const upload = await patchRequest(0, body(uploadSize, {pattern: 'test'}));
+                expect(upload.status).toBe(204);
+                expect(upload.headers.get('Upload-Offset')).toBe(uploadSize.toString());
+
+                const get = await getRequest();
+                const read = await get.text();
+                expect(bodyMatchesPattern(read, 'test')).toBe(true);
+
+                const expectedEtag = await s3Etag(body(uploadSize, {pattern: 'test'}));
+                expect(get.headers.get('etag')).toBe(expectedEtag);
+            });
+
+    });
+}
 
 
 describe('completed object read operations', () => {
@@ -621,49 +700,51 @@ describe('completed object read operations', () => {
 });
 
 
-describe('path routing', () => {
-    async function upload(bucket: string, name: string, auth: string, body: Buffer): Promise<Response> {
-        return await SELF.fetch(`http://localhost/upload/${bucket}/`, {
-            method: 'POST',
-            headers: {
-                'Authorization': auth,
-                'Tus-Resumable': '1.0.0',
-                'Upload-Metadata': `filename ${btoa(name)}`,
-                'Upload-Length': body.length.toString(),
-                'Content-Type': 'application/offset+octet-stream'
-            },
-            body: body
+for (const authType of ['basic', 'bearer'] as AuthType[]) {
+    describe(`path routing (${authType})`, () => {
+        async function upload(bucket: string, name: string, auth: string, body: Buffer): Promise<Response> {
+            return await SELF.fetch(`http://localhost/upload/${bucket}/`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': auth,
+                    'Tus-Resumable': '1.0.0',
+                    'Upload-Metadata': `filename ${btoa(name)}`,
+                    'Upload-Length': body.length.toString(),
+                    'Content-Type': 'application/offset+octet-stream'
+                },
+                body: body
+            });
+        }
+
+        it('selects correct bucket', async () => {
+            const attachmentName = 'subdir/attachmentName';
+            const backupName = 'subdir/backupName';
+            const attachmentBlob = Buffer.from('attachment123', 'utf-8');
+            const backupBlob = Buffer.from('backup123', 'utf-8');
+
+            // write the attachment to the attachments bucket, the backup to the backup bucket
+            await upload(attachmentsPath, attachmentName, await headerFor(attachmentName, authType), attachmentBlob);
+            await upload(backupsPath, backupName, await backupHeaderFor(backupName, 'write', authType), backupBlob);
+
+            // the attachments bucket should have the attachment but not the backup
+            let resp = await SELF.fetch(`http://localhost/${attachmentsPath}/${attachmentName}`);
+            expect(await resp.text()).toBe('attachment123');
+            resp = await SELF.fetch(`http://localhost/${attachmentsPath}/${backupName}`);
+            expect(resp.status).toBe(404);
+
+            // the backup bucket should have the backup but not the attachment
+            resp = await SELF.fetch(`http://localhost/${backupsPath}/${attachmentName}`, {
+                headers: {'Authorization': await backupHeaderFor('subdir', 'read', authType)}
+            });
+            expect(resp.status).toBe(404);
+            resp = await SELF.fetch(`http://localhost/${backupsPath}/${backupName}`, {
+                headers: {'Authorization': await backupHeaderFor('subdir', 'read', authType)}
+            });
+            expect(await resp.text()).toBe('backup123');
+
         });
-    }
-
-    it('selects correct bucket', async () => {
-        const attachmentName = 'subdir/attachmentName';
-        const backupName = 'subdir/backupName';
-        const attachmentBlob = Buffer.from('attachment123', 'utf-8');
-        const backupBlob = Buffer.from('backup123', 'utf-8');
-
-        // write the attachment to the attachments bucket, the backup to the backup bucket
-        await upload(attachmentsPath, attachmentName, await headerFor(attachmentName), attachmentBlob);
-        await upload(backupsPath, backupName, await backupHeaderFor(backupName, 'write'), backupBlob);
-
-        // the attachments bucket should have the attachment but not the backup
-        let resp = await SELF.fetch(`http://localhost/${attachmentsPath}/${attachmentName}`);
-        expect(await resp.text()).toBe('attachment123');
-        resp = await SELF.fetch(`http://localhost/${attachmentsPath}/${backupName}`);
-        expect(resp.status).toBe(404);
-
-        // the backup bucket should have the backup but not the attachment
-        resp = await SELF.fetch(`http://localhost/${backupsPath}/${attachmentName}`, {
-            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
-        });
-        expect(resp.status).toBe(404);
-        resp = await SELF.fetch(`http://localhost/${backupsPath}/${backupName}`, {
-            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
-        });
-        expect(await resp.text()).toBe('backup123');
-
     });
-});
+}
 
 function fillPattern(targetSize: number, pattern: string): Uint8Array {
     const patternBytes = new TextEncoder().encode(pattern);

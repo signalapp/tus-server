@@ -8,7 +8,7 @@ import {afterAll, beforeAll, describe, expect, it, test} from 'vitest';
 import * as tus from 'tus-js-client';
 import {UploadOptions} from 'tus-js-client';
 import {unstable_dev, Unstable_DevWorker} from 'wrangler';
-import {attachmentsPath, backupHeaderFor, backupsPath, headerFor, secret} from '../src/testutil';
+import {attachmentsPath, AuthType, backupHeaderFor, backupsPath, headerFor, secret} from '../src/testutil';
 
 let worker: Unstable_DevWorker;
 
@@ -39,24 +39,26 @@ async function tusClientUpload(name: string, pathPrefix: string, authHeader: str
     });
 }
 
-describe('tus-js-client-%s', () => {
-    const name = 'test-client-obj';
+for (const authType of ['basic', 'bearer'] as AuthType[]) {
+    describe(`tus-js-client (${authType})`, () => {
+        const name = 'test-client-obj';
 
-    test.each([false, true])('uploads creation-with-upload=%s',
-        async (uploadDataDuringCreation: boolean) => {
+        test.each([false, true])('uploads creation-with-upload=%s',
+            async (uploadDataDuringCreation: boolean) => {
+                const blob = Buffer.from('test', 'utf-8');
+                await tusClientUpload(name, attachmentsPath, await headerFor(name, authType), blob, {uploadDataDuringCreation: uploadDataDuringCreation});
+                const resp = await worker.fetch(`http://localhost/${attachmentsPath}/${name}`);
+                expect(await resp.text()).toBe('test');
+            });
+
+        it('accepts uploads with slashes', async () => {
             const blob = Buffer.from('test', 'utf-8');
-            await tusClientUpload(name, attachmentsPath, await headerFor(name), blob, {uploadDataDuringCreation: uploadDataDuringCreation});
-            const resp = await worker.fetch(`http://localhost/${attachmentsPath}/${name}`);
+            const name = 'subdir/b/c';
+            await tusClientUpload(name, backupsPath, await backupHeaderFor(name, 'write', authType), blob);
+            const resp = await worker.fetch(`http://localhost/${backupsPath}/${name}`, {
+                headers: {'Authorization': await backupHeaderFor('subdir', 'read', authType)}
+            });
             expect(await resp.text()).toBe('test');
         });
-
-    it('accepts uploads with slashes', async () => {
-        const blob = Buffer.from('test', 'utf-8');
-        const name = 'subdir/b/c';
-        await tusClientUpload(name, backupsPath, await backupHeaderFor(name, 'write'), blob);
-        const resp = await worker.fetch(`http://localhost/${backupsPath}/${name}`, {
-            headers: {'Authorization': await backupHeaderFor('subdir', 'read')}
-        });
-        expect(await resp.text()).toBe('test');
     });
-});
+}

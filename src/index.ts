@@ -4,6 +4,7 @@
 import {error, IRequest, json, Router, StatusError} from 'itty-router';
 import {Auth, createAuth} from './auth';
 import {Buffer} from 'node:buffer';
+import {jwtVerify, errors as joseErrors} from 'jose';
 import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
 import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
@@ -12,6 +13,8 @@ import {DEFAULT_RETRY_PARAMS, retry, isR2RangedReadHeaderError, RetryBucket,} fr
 export {UploadHandler, BackupUploadHandler, AttachmentUploadHandler} from './uploadHandler';
 
 const DO_CALL_TIMEOUT = 1000 * 60 * 30; // 20 minutes
+const MAX_TOKEN_AGE = 3600 * 24 * 7; // 7 days
+
 
 export interface Env {
     SHARED_AUTH_SECRET: string;
@@ -54,17 +57,17 @@ router
     // TUS protocol operations, dispatched to an UploadHandler durable object
     .post(`/upload/${ATTACHMENT_PREFIX}`,
         withNamespace(ATTACHMENT_PREFIX),
-        withAuthenticatedUser,
+        withAuthenticatedClaims,
         withAuthorizedKeyFromMetadata,
         uploadHandler)
     .patch(`/upload/${ATTACHMENT_PREFIX}/:id+`,
         withNamespace(ATTACHMENT_PREFIX),
-        withAuthenticatedUser,
+        withAuthenticatedClaims,
         withAuthorizedKeyFromPath,
         uploadHandler)
     .head(`/upload/${ATTACHMENT_PREFIX}/:id+`,
         withNamespace(ATTACHMENT_PREFIX),
-        withAuthenticatedUser,
+        withAuthenticatedClaims,
         withAuthorizedKeyFromPath,
         uploadHandler)
 
@@ -75,34 +78,34 @@ router
     // read the object :subdir/:id directly from R2, the request needs read permissions for :subdir
     .get(`/${BACKUP_PREFIX}/:subdir/:id+`,
         withNamespace(BACKUP_PREFIX),
-        withAuthenticatedUser,
-        withReadAuthorization,
+        withAuthenticatedClaims,
+        checkReadAuthorization,
         withSubdirAuthorizedKey,
         getHandler)
     // head the object :subdir/:id directly from R2, the request needs read permissions for :subdir
     .head(`/${BACKUP_PREFIX}/:subdir/:id+`,
         withNamespace(BACKUP_PREFIX),
-        withAuthenticatedUser,
-        withReadAuthorization,
+        withAuthenticatedClaims,
+        checkReadAuthorization,
         withSubdirAuthorizedKey,
         headHandler)
     // TUS protocol operations, dispatched to an UploadHandler durable object
     .post(`/upload/${BACKUP_PREFIX}`,
         withNamespace(BACKUP_PREFIX),
-        withAuthenticatedUser,
-        withWriteAuthorization,
+        withAuthenticatedClaims,
+        checkWriteAuthorization,
         withAuthorizedKeyFromMetadata,
         uploadHandler)
     .patch(`/upload/${BACKUP_PREFIX}/:id+`,
         withNamespace(BACKUP_PREFIX),
-        withAuthenticatedUser,
-        withWriteAuthorization,
+        withAuthenticatedClaims,
+        checkWriteAuthorization,
         withAuthorizedKeyFromPath,
         uploadHandler)
     .head(`/upload/${BACKUP_PREFIX}/:id+`,
         withNamespace(BACKUP_PREFIX),
-        withAuthenticatedUser,
-        withWriteAuthorization,
+        withAuthenticatedClaims,
+        checkWriteAuthorization,
         withAuthorizedKeyFromPath,
         uploadHandler)
 
@@ -334,157 +337,206 @@ function withNamespace(bucket: string): (request: IRequest, env: Env, ctx: Execu
 }
 
 interface ParseError {
-    state: 'error',
+    type: 'error',
     error: Response
 }
 
 interface Credentials {
-    state: 'success',
+    type: 'basic',
     user: string,
     password: string
 }
 
-function parseBasicAuth(auth: string): Credentials | ParseError {
-    const prefix = 'Basic ';
-    if (!auth.startsWith(prefix)) {
-        return {state: 'error', error: error(400, 'auth should be Basic ')};
-    }
-    const cred = auth.slice(prefix.length);
-    const decoded = Buffer.from(cred, 'base64').toString('utf8');
-
-    const [username, ...rest] = decoded.split(':');
-    const password = rest.join(':');
-    if (!username || !password) {
-        return {state: 'error', error: error(400, 'invalid auth format')};
-    }
-    return {state: 'success', user: username, password: password};
+interface Token {
+    type: 'bearer',
+    token: string,
 }
 
+function parseAuthHeader(auth: string): Credentials | Token | ParseError {
+    const basic = 'Basic ';
+    const bearer = 'Bearer ';
+    if (auth.startsWith(basic)) {
+        const cred = auth.slice(basic.length);
+        const decoded = Buffer.from(cred, 'base64').toString('utf8');
 
-// Set request.user to the user from the basic auth credentials if the credential passes authentication
-async function withAuthenticatedUser(request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response | undefined> {
-    auth = auth || await createAuth(env.SHARED_AUTH_SECRET, 3600 * 24 * 7);
+        const [username, ...rest] = decoded.split(':');
+        const password = rest.join(':');
+        if (!username || !password) {
+            return {type: 'error', error: error(400, 'invalid auth format')};
+        }
+        return {type: 'basic', user: username, password: password};
+    } else if (auth.startsWith(bearer)) {
+        return {type: 'bearer', token: auth.slice(bearer.length)};
+    } else {
+        return {type: 'error', error: error(400, 'invalid auth format')};
+    }
+}
+
+// Set request.authenticatedClaims if the credential passes authentication
+async function withAuthenticatedClaims(request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response | undefined> {
+    auth = auth || await createAuth(env.SHARED_AUTH_SECRET, MAX_TOKEN_AGE);
     const authHeader = request.headers.get('Authorization');
     if (!authHeader) {
         return error(401, 'missing credentials');
     }
 
-    const parsed = parseBasicAuth(authHeader);
-    if (parsed.state === 'error') {
-        return parsed.error;
+    // the namespace should have been set by a prior middleware and should match the audience in the credential
+    const namespace: Namespace = request.namespace;
+    if (namespace == null) {
+        return error(401);
     }
 
-    const valid = await auth.validateCredentials(parsed.user, parsed.password);
-    if (!valid) {
+    const parsed = parseAuthHeader(authHeader);
+    if (parsed.type === 'error') {
+        return parsed.error;
+    }
+    const authenticatedClaims = await (parsed.type === 'basic'
+        ? authenticateCredentials(namespace, auth, parsed)
+        : authenticateToken(namespace, env.SHARED_AUTH_SECRET, parsed));
+
+    if (authenticatedClaims === null) {
         return error(401, 'invalid credentials');
     }
-    request.user = parsed.user;
+
+    request.authenticatedClaims = authenticatedClaims;
+}
+
+interface AuthenticatedClaims {
+    audience: string;
+    subject: string;
+    scope?: 'read' | 'write';
+}
+
+async function authenticateCredentials(namespace: Namespace, auth: Auth, credentials: Credentials): Promise<AuthenticatedClaims | null> {
+
+    // Auth usernames are of the form [permission$]namespace/entity.
+    let user = credentials.user;
+
+    const valid = await auth.validateCredentials(credentials.user, credentials.password);
+    if (!valid) {
+        return null;
+    }
+
+    const permissionSep = user.indexOf('$');
+    let scope: 'read' | 'write' | undefined;
+    if (permissionSep !== -1) {
+        const rawPermission = user.substring(0, permissionSep);
+        if (rawPermission !== 'write' && rawPermission !== 'read') {
+            return null;
+        }
+        scope = rawPermission;
+        user = user.substring(permissionSep + 1);
+    }
+
+    const audienceSep = user.indexOf('/');
+    if (audienceSep === -1) {
+        return null;
+    }
+    const audience = user.substring(0, audienceSep);
+    user = user.substring(audienceSep + 1);
+
+    if (namespace.name !== audience) {
+        return null;
+    }
+
+    return {
+        audience: audience,
+        subject: user,
+        scope: scope,
+    };
+}
+
+async function authenticateToken(namespace: Namespace, secretString: string, jwtToken: Token): Promise<AuthenticatedClaims | null> {
+    const secret = new Uint8Array(Buffer.from(secretString, 'base64'));
+    try {
+        const {payload} = await jwtVerify(jwtToken.token, secret, {
+            algorithms: ['HS256'],
+            audience: namespace.name,
+            maxTokenAge: MAX_TOKEN_AGE
+        });
+        const sub = payload.sub;
+        if (!sub) {
+            return null;
+        }
+        const scope = payload.scope as string | undefined;
+        if (scope !== undefined && scope !== 'read' && scope !== 'write') {
+            return null;
+        }
+        return {
+            audience: namespace.name,
+            subject: sub,
+            scope: scope,
+        };
+    } catch (e) {
+        if (e instanceof joseErrors.JOSEError) {
+            return null;
+        }
+        throw e;
+    }
 }
 
 
-// Auth usernames are of the form [permission$]namespace/entity. withAuthenticatedUser ensures that the username is
-// a valid credential. After that we must also ensure that the user is authorized to perform the requested action.
+// withAuthenticatedClaims ensures that the request has a valid credential signed by the appropriate authority.
+// After that we must also ensure that the credential is authorized to perform the requested action.
 // - If the endpoint requires permission, the permission field must be extracted and checked
 // - The namespace must match the path prefix, e.g. attachments or backups
 // - For uploads, the entity must match the target of the upload operation (which may be specified via path or metadata)
 // - For non-public reads, the entity must match the top-level parent directory of the read-target
 
-
-// Extracts the permission specifier from the already authenticated request.user and if it is 'read', set request.user
-// to the rest of the username
-function withReadAuthorization(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
-    return withPermission('read', request, env);
-}
-
-// Extracts the permission specifier from the already authenticated request.user and if it is 'write', set request.user
-// to the rest of the username
-function withWriteAuthorization(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
-    return withPermission('write', request, env);
-}
-
-// Strips off the permission specifier and make sure it matches expectedPermission
-function withPermission(expectedPermission: string, request: IRequest, _env: Env): Response | undefined {
-    // the user should be set by a prior middleware (and should already have been authenticated)
-    if (!request.user) {
-        return error(500);
-    }
-    // strip off the permission and check it
-    const splAt = request.user.indexOf('$');
-    if (splAt === -1) {
+// Verify that the permission specifier in the already authenticated claims is set to 'read'
+function checkReadAuthorization(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    if (authenticatedClaims(request).scope !== 'read') {
         return error(401);
     }
-    const permission = request.user.substring(0, splAt);
-    if (permission !== expectedPermission) {
+}
+
+// Verify that the permission specifier in the already authenticated claims is set to 'write'
+function checkWriteAuthorization(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    if (authenticatedClaims(request).scope !== 'write') {
         return error(401);
     }
-
-    // set the user as the remainder of the username
-    request.user = request.user.substring(splAt + 1);
 }
 
-// Set request.key to :subdir/:id from the request path, if the authenticated user matches :subdir
-function withSubdirAuthorizedKey(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
-    return setAuthorizedKey({
-        keyExtractor: (request) => `${request.params.subdir}/${request.params.id}`,
-        entityExtractor: (request) => request.params.subdir
-    }, request, env);
-}
-
-// Set request.key to the name extracted from :id in the request path, if the authenticated user matches the name
-function withAuthorizedKeyFromPath(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
-    return setAuthorizedKey({keyExtractor: (request) => `${request.params.id}`}, request, env);
-}
-
-// Set request.key to the name extracted from the uploadMetadata, if the authenticated user the name
-function withAuthorizedKeyFromMetadata(request: IRequest, env: Env, _ctx: ExecutionContext): Response | undefined {
-    return setAuthorizedKey({
-        keyExtractor: (request) => parseUploadMetadata(request.headers).filename
-    }, request, env);
-}
-
-export interface AuthOptions {
-    // How to extract the key that will be attached to the request after a successful check
-    keyExtractor: (request: IRequest) => string | undefined;
-    // How to extract the expected contents of the username after the permission. If not
-    // specified, defaults to the key
-    entityExtractor?: (request: IRequest) => string | undefined;
-}
-
-// Set request.key to the request's target if the (already authenticated) username matches the expected username for
-// that target
-function setAuthorizedKey(authOptions: AuthOptions, request: IRequest, _env: Env): Response | undefined {
-    // the user should be set by a prior middleware (and should already have been authenticated)
-    if (!request.user) {
-        return error(500);
-    }
-
-    // the namespace should have been set based on the request path by a prior middleware
-    if (!request.namespace) {
-        return error(404);
-    }
-
-    // the key within the namespace that this request will operate on
-    const key = authOptions.keyExtractor(request);
-    if (!key) {
+// Set request.key to :subdir/:id from the request path, if the authenticated subject matches :subdir
+function withSubdirAuthorizedKey(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    const claims = authenticatedClaims(request);
+    if (claims.subject !== request.params.subdir) {
         return error(401);
     }
+    request.key = `${request.params.subdir}/${request.params.id}`;
+}
 
-    // the entity within the namespace that should match the provided username
-    const expectedEntity = (authOptions.entityExtractor || authOptions.keyExtractor)(request);
-    if (!expectedEntity) {
+// Set request.key to the name extracted from :id in the request path, if the authenticated subject matches the name
+function withAuthorizedKeyFromPath(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    const claims = authenticatedClaims(request);
+    if (claims.subject !== request.params.id) {
         return error(401);
     }
+    request.key = request.params.id;
+}
 
-    // the username must match the expected entity that grants permission to the key
-    if (request.user !== `${request.namespace.name}/${expectedEntity}`) {
+// Set request.key to the name extracted from the uploadMetadata, if the authenticated subject matches the name
+function withAuthorizedKeyFromMetadata(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    const claims = authenticatedClaims(request);
+    const key = parseUploadMetadata(request.headers).filename;
+    if (claims.subject !== key) {
         return error(401);
     }
     request.key = key;
 }
 
-
 // Set request.key without any authentication (public access)
 function withUnauthenticatedKeyFromId(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
     request.key = request.params.id;
     return;
+}
+
+// Return the previously authenticated claims from a request or throw an error
+function authenticatedClaims(request: IRequest): AuthenticatedClaims {
+    // the claims should have been set by a prior middleware
+    const claims: AuthenticatedClaims = request.authenticatedClaims;
+    if (!claims) {
+        throw new StatusError(500);
+    }
+    return claims;
 }
