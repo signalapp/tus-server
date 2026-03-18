@@ -1,5 +1,3 @@
-import {Blob, R2UploadedPart} from '@cloudflare/workers-types';
-
 // Retries with backoff of [100ms, 200ms, 400ms, 800ms, 1600ms]
 export const DEFAULT_RETRY_PARAMS = {maxRetries: 5, durationMillis: 100};
 
@@ -100,7 +98,7 @@ export class RetryBucket {
     async put(
         key: string,
         value: (ArrayBuffer | ArrayBufferView) | string | Blob,
-        checksum?: string | ArrayBuffer
+        checksum?: string | ArrayBuffer | Uint8Array
     ): ReturnType<R2Bucket['put']> {
 
         return retry(
