@@ -8,7 +8,7 @@
 import {describe, expect, it, test} from 'vitest';
 import {attachmentsPath, AuthType, backupHeaderFor, backupsPath, headerFor, secret} from './testutil';
 import {SELF} from 'cloudflare:test';
-import {X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
+import {X_SIGNAL_CHECKSUM_SHA256, X_SIGNAL_MAX_UPLOAD_LENGTH} from './uploadHandler';
 import {toBase64} from './util';
 import {SignJWT} from 'jose';
 import './env.d.ts';
@@ -102,12 +102,16 @@ describe('jwt worker auth', () => {
         sub?: string,
         aud?: string,
         scope?: string,
+        maxLen?: number | string,
         secret?: Uint8Array,
         iat?: number,
     }): Promise<string> {
         const claims: Record<string, unknown> = {};
         if (overrides?.scope !== undefined) {
             claims.scope = overrides.scope;
+        }
+        if (overrides?.maxLen !== undefined) {
+            claims.len = overrides.maxLen;
         }
         let builder = new SignJWT(claims)
             .setProtectedHeader({alg: 'HS256'})
@@ -138,13 +142,15 @@ describe('jwt worker auth', () => {
     const wrongSecret = new Uint8Array(Buffer.from('aaaaaa', 'base64'));
 
     it.each([
-        ['wrong secret', {sub: 'abc', aud: attachmentsPath, secret: wrongSecret}],
-        ['wrong audience', {sub: 'abc', aud: 'wrong'}],
-        ['missing sub', {aud: attachmentsPath}],
-        ['missing aud', {sub: 'abc'}],
-        ['expired token', {sub: 'abc', aud: attachmentsPath, iat: eightDaysAgo}],
-        ['invalid permission', {sub: 'abc', aud: attachmentsPath, scope: 'admin'}],
-        ['subject mismatch', {sub: 'wrong', aud: attachmentsPath}],
+        ['wrong secret', {sub: 'abc', aud: attachmentsPath, maxLen: 1, secret: wrongSecret}],
+        ['wrong audience', {sub: 'abc', aud: 'wrong', maxLen: 1}],
+        ['missing sub', {aud: attachmentsPath, maxLen: 1}],
+        ['missing aud', {sub: 'abc', maxLen: 1}],
+        ['expired token', {sub: 'abc', aud: attachmentsPath, maxLen: 1, iat: eightDaysAgo}],
+        ['invalid permission', {sub: 'abc', aud: attachmentsPath, maxLen: 1, scope: 'admin'}],
+        ['subject mismatch', {sub: 'wrong', aud: attachmentsPath, maxLen: 1}],
+        ['missing len', {sub: 'abc', aud: attachmentsPath}],
+        ['non-numeric len', {sub: 'abc', aud: attachmentsPath, maxLen: 'abc'}],
     ])('rejects %s', async (_label, overrides) => {
         const token = await signToken(overrides);
         const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
@@ -168,6 +174,50 @@ describe('jwt worker auth', () => {
             }
         });
         expect(res.status).toBe(401);
+    });
+
+    it('strips client-supplied max upload length header', async () => {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await headerFor('abc', 'bearer', 10),
+                'Upload-Length': '4',
+                [X_SIGNAL_MAX_UPLOAD_LENGTH]: '999999999',
+            }
+        });
+        expect(res.status).toBe(201);
+        await res.body?.cancel();
+
+        // Should use the 10-byte limit from the token, not the larger limit we're trying to spoof
+        const upload = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/abc`, {
+            method: 'PATCH',
+            headers: {
+                'Authorization': await headerFor('abc', 'bearer', 10),
+                'Upload-Offset': '0',
+                'Content-Type': 'application/offset+octet-stream',
+                'Tus-Resumable': '1.0.0',
+                [X_SIGNAL_MAX_UPLOAD_LENGTH]: '999999999',
+            },
+            body: '12345678901234567890'
+        });
+        expect(upload.status).toBe(413);
+        await upload.body?.cancel();
+    });
+
+    it('enforces max upload length from token', async () => {
+        const res = await SELF.fetch(`http://localhost/upload/${attachmentsPath}/`, {
+            method: 'POST',
+            headers: {
+                'Upload-Metadata': `filename ${btoa('abc')}`,
+                'Authorization': await headerFor('abc', 'bearer', 5),
+                'Upload-Length': '10',
+                'Content-Type': 'application/offset+octet-stream',
+            },
+            body: '12345'
+        });
+        expect(res.status).toBe(413);
+        await res.body?.cancel();
     });
 });
 

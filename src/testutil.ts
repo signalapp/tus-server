@@ -3,6 +3,7 @@
 
 import {createAuth} from './auth';
 import {SignJWT} from 'jose';
+import {MAX_UPLOAD_LENGTH_BYTES} from './uploadHandler';
 
 export const attachmentsPath = 'attachments';
 export const backupsPath = 'backups';
@@ -14,9 +15,9 @@ const jwtSecret = new Uint8Array(Buffer.from(secret, 'base64'));
 
 export type AuthType = 'basic' | 'bearer';
 
-export async function headerFor(key: string, type: AuthType = 'bearer'): Promise<string> {
+export async function headerFor(key: string, type: AuthType = 'bearer', maxLen: number = MAX_UPLOAD_LENGTH_BYTES): Promise<string> {
     if (type === 'bearer') {
-        const token = await new SignJWT({})
+        const token = await new SignJWT({maxLen})
             .setProtectedHeader({alg: 'HS256'})
             .setSubject(key)
             .setAudience(attachmentsPath)
@@ -30,9 +31,9 @@ export async function headerFor(key: string, type: AuthType = 'bearer'): Promise
     }
 }
 
-export async function backupHeaderFor(key: string, permission: string, type: AuthType = 'bearer'): Promise<string> {
+export async function backupHeaderFor(key: string, permission: string, type: AuthType = 'bearer', maxLen: number = MAX_UPLOAD_LENGTH_BYTES): Promise<string> {
     if (type === 'bearer') {
-        const token = await new SignJWT({scope: permission})
+        const token = await new SignJWT({scope: permission, maxLen})
             .setProtectedHeader({alg: 'HS256'})
             .setSubject(key)
             .setAudience(backupsPath)

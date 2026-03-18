@@ -18,7 +18,10 @@ import {R2UploadedPart} from '@cloudflare/workers-types';
 
 export const TUS_VERSION = '1.0.0';
 
-// uploads larger than this will be rejected
+// Set by the worker to indicate the maximum upload length we should allow
+export const X_SIGNAL_MAX_UPLOAD_LENGTH = 'X-Signal-Max-Upload-Length';
+
+// If no `X_SIGNAL_MAX_UPLOAD_LENGTH` is provided by the calling worker, we will default to this
 export const MAX_UPLOAD_LENGTH_BYTES = 1024 * 1024 * 100;
 
 export const X_SIGNAL_CHECKSUM_SHA256 = 'X-Signal-Checksum-Sha256';
@@ -190,7 +193,7 @@ export class UploadHandler {
         const uploadLocation = new URL(r2Key, request.url.endsWith('/') ? request.url : request.url + '/');
 
         const uploadOffset = hasContent
-            ? await this.appendBody(r2Key, request.body, 0, uploadInfo)
+            ? await this.appendBody(r2Key, request.body, 0, this.maxUploadLength(request), uploadInfo)
             : 0;
         return new Response(null, {
             status: 201,
@@ -267,7 +270,7 @@ export class UploadHandler {
             return error(400, 'Must provide request body');
         }
 
-        uploadOffset = await this.appendBody(r2Key, request.body, uploadOffset, uploadInfo);
+        uploadOffset = await this.appendBody(r2Key, request.body, uploadOffset, this.maxUploadLength(request), uploadInfo);
 
         return new Response(null, {
             status: 204, headers: new Headers({
@@ -298,9 +301,9 @@ export class UploadHandler {
     // adding custom metadata to the object when we create the multipart upload. For A, if the client manages to upload
     // the object in one-shot we calculate the digest as it comes in. Otherwise, after the multipart upload is
     // finished, we retrieve the object from R2 and recompute the digest.
-    async appendBody(r2Key: string, body: ReadableStream<Uint8Array>, uploadOffset: number, uploadInfo: StoredUploadInfo): Promise<number> {
+    async appendBody(r2Key: string, body: ReadableStream<Uint8Array>, uploadOffset: number, maxUploadLength: number, uploadInfo: StoredUploadInfo): Promise<number> {
         const uploadLength = uploadInfo.uploadLength;
-        if ((uploadLength || 0) > MAX_UPLOAD_LENGTH_BYTES) {
+        if ((uploadLength || 0) > maxUploadLength) {
             await this.cleanup(r2Key);
             throw new StatusError(413, 'Upload-Length exceeds maximum upload size');
         }
@@ -321,7 +324,7 @@ export class UploadHandler {
                 await this.cleanup(r2Key);
                 throw new StatusError(413, 'body exceeds Upload-Length');
             }
-            if (newLength > MAX_UPLOAD_LENGTH_BYTES) {
+            if (newLength > maxUploadLength) {
                 await this.cleanup(r2Key);
                 throw new StatusError(413, 'body exceeds maximum upload size');
             }
@@ -544,6 +547,14 @@ export class UploadHandler {
 
     tempkey(): string {
         return 'temporary/' + this.state.id.toString();
+    }
+
+    maxUploadLength(request: IRequest): number {
+        const maxUploadLength = readIntFromHeader(request.headers, X_SIGNAL_MAX_UPLOAD_LENGTH);
+        if (isNaN(maxUploadLength)) {
+            return MAX_UPLOAD_LENGTH_BYTES;
+        }
+        return maxUploadLength;
     }
 
     // Cleanup the state for this durable object. If r2Key is provided, the method will make

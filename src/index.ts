@@ -5,7 +5,12 @@ import {error, IRequest, json, Router, StatusError} from 'itty-router';
 import {Auth, createAuth} from './auth';
 import {Buffer} from 'node:buffer';
 import {jwtVerify, errors as joseErrors} from 'jose';
-import {MAX_UPLOAD_LENGTH_BYTES, TUS_VERSION, X_SIGNAL_CHECKSUM_SHA256} from './uploadHandler';
+import {
+    MAX_UPLOAD_LENGTH_BYTES,
+    TUS_VERSION,
+    X_SIGNAL_CHECKSUM_SHA256,
+    X_SIGNAL_MAX_UPLOAD_LENGTH
+} from './uploadHandler';
 import {toBase64} from './util';
 import {parseUploadMetadata} from './parse';
 import {DEFAULT_RETRY_PARAMS, retry, isR2RangedReadHeaderError, RetryBucket,} from './retry';
@@ -59,16 +64,19 @@ router
         withNamespace(ATTACHMENT_PREFIX),
         withAuthenticatedClaims,
         withAuthorizedKeyFromMetadata,
+        withAuthorizedUploadLength,
         uploadHandler)
     .patch(`/upload/${ATTACHMENT_PREFIX}/:id+`,
         withNamespace(ATTACHMENT_PREFIX),
         withAuthenticatedClaims,
         withAuthorizedKeyFromPath,
+        withAuthorizedUploadLength,
         uploadHandler)
     .head(`/upload/${ATTACHMENT_PREFIX}/:id+`,
         withNamespace(ATTACHMENT_PREFIX),
         withAuthenticatedClaims,
         withAuthorizedKeyFromPath,
+        withAuthorizedUploadLength,
         uploadHandler)
 
     // --- backup handler methods ---
@@ -95,18 +103,21 @@ router
         withAuthenticatedClaims,
         checkWriteAuthorization,
         withAuthorizedKeyFromMetadata,
+        withAuthorizedUploadLength,
         uploadHandler)
     .patch(`/upload/${BACKUP_PREFIX}/:id+`,
         withNamespace(BACKUP_PREFIX),
         withAuthenticatedClaims,
         checkWriteAuthorization,
         withAuthorizedKeyFromPath,
+        withAuthorizedUploadLength,
         uploadHandler)
     .head(`/upload/${BACKUP_PREFIX}/:id+`,
         withNamespace(BACKUP_PREFIX),
         withAuthenticatedClaims,
         checkWriteAuthorization,
         withAuthorizedKeyFromPath,
+        withAuthorizedUploadLength,
         uploadHandler)
 
     .all('*', () => error(404));
@@ -257,7 +268,6 @@ async function optionsHandler(_request: IRequest, _env: Env): Promise<Response> 
         headers: new Headers({
             'Tus-Resumable': TUS_VERSION,
             'Tus-Version': TUS_VERSION,
-            'Tus-Max-Size': MAX_UPLOAD_LENGTH_BYTES.toString(),
             'Tus-Extension': 'creation,creation-defer-length,creation-with-upload,expiration'
         })
     });
@@ -273,12 +283,23 @@ async function uploadHandler(request: IRequest, _env: Env): Promise<Response> {
         return error(500, 'invalid bucket configuration');
     }
 
+    const maxUploadLength = request.maxUploadLength;
+    if (maxUploadLength == null) {
+        return error(500, 'expected maximum upload length not found');
+    }
+
+    const headers = new Headers(request.headers);
+
+    // Let the durable-object know what our authenticated max upload length is. Replace the header if the
+    // user tried to set it themselves
+    headers.set(X_SIGNAL_MAX_UPLOAD_LENGTH, maxUploadLength.toString());
+
     return retry(async () => {
         const handler = durableObjNs.get(durableObjNs.idFromName(requestId));
         return await handler.fetch(request.url, {
             body: request.body,
             method: request.method,
-            headers: request.headers,
+            headers: headers,
             signal: AbortSignal.timeout(DO_CALL_TIMEOUT)
         });
     }, {
@@ -405,6 +426,7 @@ interface AuthenticatedClaims {
     audience: string;
     subject: string;
     scope?: 'read' | 'write';
+    maxUploadLength?: number;
 }
 
 async function authenticateCredentials(namespace: Namespace, auth: Auth, credentials: Credentials): Promise<AuthenticatedClaims | null> {
@@ -443,6 +465,8 @@ async function authenticateCredentials(namespace: Namespace, auth: Auth, credent
         audience: audience,
         subject: user,
         scope: scope,
+        // Basic auth doesn't support an uploadLength claim, so use the hard-coded default
+        maxUploadLength: MAX_UPLOAD_LENGTH_BYTES
     };
 }
 
@@ -455,6 +479,7 @@ async function authenticateToken(namespace: Namespace, secretString: string, jwt
             maxTokenAge: MAX_TOKEN_AGE
         });
         const sub = payload.sub;
+        const maxLen = typeof payload.maxLen === 'number' ? payload.maxLen : undefined;
         if (!sub) {
             return null;
         }
@@ -466,6 +491,7 @@ async function authenticateToken(namespace: Namespace, secretString: string, jwt
             audience: namespace.name,
             subject: sub,
             scope: scope,
+            maxUploadLength: maxLen
         };
     } catch (e) {
         if (e instanceof joseErrors.JOSEError) {
@@ -525,6 +551,15 @@ function withAuthorizedKeyFromMetadata(request: IRequest, _env: Env, _ctx: Execu
     request.key = key;
 }
 
+// Set request.maxUploadLength to the upload length extracted from the claims
+function withAuthorizedUploadLength(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
+    const claims = authenticatedClaims(request);
+    if (claims.maxUploadLength == null) {
+        return error(401);
+    }
+    request.maxUploadLength = claims.maxUploadLength;
+}
+
 // Set request.key without any authentication (public access)
 function withUnauthenticatedKeyFromId(request: IRequest, _env: Env, _ctx: ExecutionContext): Response | undefined {
     request.key = request.params.id;
@@ -536,7 +571,7 @@ function authenticatedClaims(request: IRequest): AuthenticatedClaims {
     // the claims should have been set by a prior middleware
     const claims: AuthenticatedClaims = request.authenticatedClaims;
     if (!claims) {
-        throw new StatusError(500);
+        throw new StatusError(500, 'expected claims were not found');
     }
     return claims;
 }
