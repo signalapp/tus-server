@@ -2,11 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 import {error, IRequest, json, Router, StatusError} from 'itty-router';
-import {Auth, createAuth} from './auth';
 import {Buffer} from 'node:buffer';
 import {jwtVerify, errors as joseErrors} from 'jose';
 import {
-    MAX_UPLOAD_LENGTH_BYTES,
     TUS_VERSION,
     X_SIGNAL_CHECKSUM_SHA256,
     X_SIGNAL_MAX_UPLOAD_LENGTH
@@ -36,9 +34,6 @@ export interface Env {
 const ATTACHMENT_PREFIX = 'attachments';
 const BACKUP_PREFIX = 'backups';
 
-
-// lazy init because it requires env but is expensive to create
-let auth: Auth | undefined;
 
 const router = Router();
 router
@@ -362,31 +357,14 @@ interface ParseError {
     error: Response
 }
 
-interface Credentials {
-    type: 'basic',
-    user: string,
-    password: string
-}
-
 interface Token {
     type: 'bearer',
     token: string,
 }
 
-function parseAuthHeader(auth: string): Credentials | Token | ParseError {
-    const basic = 'Basic ';
+function parseAuthHeader(auth: string): Token | ParseError {
     const bearer = 'Bearer ';
-    if (auth.startsWith(basic)) {
-        const cred = auth.slice(basic.length);
-        const decoded = Buffer.from(cred, 'base64').toString('utf8');
-
-        const [username, ...rest] = decoded.split(':');
-        const password = rest.join(':');
-        if (!username || !password) {
-            return {type: 'error', error: error(400, 'invalid auth format')};
-        }
-        return {type: 'basic', user: username, password: password};
-    } else if (auth.startsWith(bearer)) {
+    if (auth.startsWith(bearer)) {
         return {type: 'bearer', token: auth.slice(bearer.length)};
     } else {
         return {type: 'error', error: error(400, 'invalid auth format')};
@@ -395,7 +373,6 @@ function parseAuthHeader(auth: string): Credentials | Token | ParseError {
 
 // Set request.authenticatedClaims if the credential passes authentication
 async function withAuthenticatedClaims(request: IRequest, env: Env, _ctx: ExecutionContext): Promise<Response | undefined> {
-    auth = auth || await createAuth(env.SHARED_AUTH_SECRET, MAX_TOKEN_AGE);
     const authHeader = request.headers.get('Authorization');
     if (!authHeader) {
         return error(401, 'missing credentials');
@@ -411,9 +388,7 @@ async function withAuthenticatedClaims(request: IRequest, env: Env, _ctx: Execut
     if (parsed.type === 'error') {
         return parsed.error;
     }
-    const authenticatedClaims = await (parsed.type === 'basic'
-        ? authenticateCredentials(namespace, auth, parsed)
-        : authenticateToken(namespace, env.SHARED_AUTH_SECRET, parsed));
+    const authenticatedClaims = await authenticateToken(namespace, env.SHARED_AUTH_SECRET, parsed);
 
     if (authenticatedClaims === null) {
         return error(401, 'invalid credentials');
@@ -429,46 +404,6 @@ interface AuthenticatedClaims {
     maxUploadLength?: number;
 }
 
-async function authenticateCredentials(namespace: Namespace, auth: Auth, credentials: Credentials): Promise<AuthenticatedClaims | null> {
-
-    // Auth usernames are of the form [permission$]namespace/entity.
-    let user = credentials.user;
-
-    const valid = await auth.validateCredentials(credentials.user, credentials.password);
-    if (!valid) {
-        return null;
-    }
-
-    const permissionSep = user.indexOf('$');
-    let scope: 'read' | 'write' | undefined;
-    if (permissionSep !== -1) {
-        const rawPermission = user.substring(0, permissionSep);
-        if (rawPermission !== 'write' && rawPermission !== 'read') {
-            return null;
-        }
-        scope = rawPermission;
-        user = user.substring(permissionSep + 1);
-    }
-
-    const audienceSep = user.indexOf('/');
-    if (audienceSep === -1) {
-        return null;
-    }
-    const audience = user.substring(0, audienceSep);
-    user = user.substring(audienceSep + 1);
-
-    if (namespace.name !== audience) {
-        return null;
-    }
-
-    return {
-        audience: audience,
-        subject: user,
-        scope: scope,
-        // Basic auth doesn't support an uploadLength claim, so use the hard-coded default
-        maxUploadLength: MAX_UPLOAD_LENGTH_BYTES
-    };
-}
 
 async function authenticateToken(namespace: Namespace, secretString: string, jwtToken: Token): Promise<AuthenticatedClaims | null> {
     const secret = new Uint8Array(Buffer.from(secretString, 'base64'));

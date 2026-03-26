@@ -14,15 +14,11 @@ import {
     RetryBucket,
     RetryMultipartUpload
 } from './retry';
-import {R2UploadedPart} from '@cloudflare/workers-types';
 
 export const TUS_VERSION = '1.0.0';
 
 // Set by the worker to indicate the maximum upload length we should allow
 export const X_SIGNAL_MAX_UPLOAD_LENGTH = 'X-Signal-Max-Upload-Length';
-
-// If no `X_SIGNAL_MAX_UPLOAD_LENGTH` is provided by the calling worker, we will default to this
-export const MAX_UPLOAD_LENGTH_BYTES = 1024 * 1024 * 100;
 
 export const X_SIGNAL_CHECKSUM_SHA256 = 'X-Signal-Checksum-Sha256';
 
@@ -550,11 +546,7 @@ export class UploadHandler {
     }
 
     maxUploadLength(request: IRequest): number {
-        const maxUploadLength = readIntFromHeader(request.headers, X_SIGNAL_MAX_UPLOAD_LENGTH);
-        if (isNaN(maxUploadLength)) {
-            return MAX_UPLOAD_LENGTH_BYTES;
-        }
-        return maxUploadLength;
+        return readIntFromHeader(request.headers, X_SIGNAL_MAX_UPLOAD_LENGTH);
     }
 
     // Cleanup the state for this durable object. If r2Key is provided, the method will make
