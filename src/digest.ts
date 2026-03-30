@@ -12,7 +12,7 @@ export function noopDigester(): Digester {
         async update(_bytes: Uint8Array): Promise<void> {
             return Promise.resolve();
         },
-        async digest(): Promise<Uint8Array | undefined> {
+        async digest(): Promise<ArrayBuffer | undefined> {
             return undefined;
         }
     };

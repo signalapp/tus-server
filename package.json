@@ -17,7 +17,8 @@
   "scripts": {
     "start": "wrangler dev",
     "deploy": "wrangler publish",
-    "build": "wrangler deploy --dry-run --outdir=dist",
+    "type-check": "tsc",
+    "build": "tsc && wrangler deploy --dry-run --outdir=dist",
     "pretest": "wrangler deploy --dry-run --outdir=dist",
     "test": "vitest"
   },
