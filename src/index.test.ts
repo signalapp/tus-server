@@ -670,6 +670,23 @@ describe('Tus', () => {
         }
     });
 
+    it('rejects incorrect checksum with multiple patches', async () => {
+        const bodySize = PART_SIZE * 2 + 1;
+        const firstPatchLength = PART_SIZE + 1;
+        await createRequest({uploadLength: bodySize, checksum: new Uint8Array(32)});
+        let upload = await patchRequest(0, body(firstPatchLength, {pattern: 'test'}));
+        expect(upload.status).toBe(204);
+        upload = await patchRequest(firstPatchLength, body(bodySize - firstPatchLength, {pattern: 'test'}));
+        expect(upload.status).toBe(415);
+        await upload.body?.cancel();
+
+        // After a failed checksum on a multi-part upload the object should not be available.
+        const obj = await getRequest();
+        expect(obj.status).toBe(404);
+        await obj.body?.cancel();
+    });
+
+
     test.each(
         [
             [100, false],

@@ -373,8 +373,17 @@ export class UploadHandler {
     }
 
     // Check a checksum, throwing a 415 if the checksum does not match
-    async checkChecksum(r2Key: string, expected: Uint8Array, actual: ArrayBuffer) {
+    async checkChecksum(r2Key: string, expected: Uint8Array, maybeActual?: ArrayBuffer) {
+        const actual = maybeActual == null
+            ? await this.retrieveChecksum(r2Key)
+            : maybeActual;
+
         if (!Buffer.from(actual).equals(expected)) {
+            if (maybeActual == null) {
+                // We are checking the checksum on an already uploaded object. Make a best-effort attempt to
+                // remove the object with an incorrect checksum.
+                await this.retryBucket.delete(r2Key);
+            }
             await this.cleanup(r2Key);
             throw new StatusError(415, `The SHA-256 checksum you specified ${toBase64(actual)} did not match what we received ${toBase64(expected)}.`);
         }
@@ -536,7 +545,7 @@ export class UploadHandler {
 
         // Otherwise we have to compute the digest from the finished upload
         if (actualChecksum == null && expectedChecksum != null) {
-            await this.checkChecksum(r2Key, expectedChecksum, await this.retrieveChecksum(r2Key));
+            await this.checkChecksum(r2Key, expectedChecksum, actualChecksum);
         }
     }
 
