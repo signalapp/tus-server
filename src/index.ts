@@ -237,6 +237,7 @@ function objectHeaders(object: R2Object): Headers {
 
     // RFC-9110 HTTP-date compliant
     headers.set('Last-Modified', object.uploaded.toUTCString());
+    headers.set('Content-Type', 'application/octet-stream');
 
     return headers;
 }
